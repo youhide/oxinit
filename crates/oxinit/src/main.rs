@@ -14,6 +14,16 @@
     clippy::indexing_slicing
 )]
 
+// Without this, building on a non-Linux host fails deep inside the signalfd
+// code with errors about missing libc items, which says nothing about the
+// actual problem.
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "oxinit is Linux-only. Cross-compile it: \
+     cargo build --target x86_64-unknown-linux-musl -p oxinit, \
+     or use `cargo xtask boot`. See CONTRIBUTING.md."
+);
+
 mod console;
 mod error;
 mod mounts;

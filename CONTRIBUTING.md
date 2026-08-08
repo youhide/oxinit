@@ -104,13 +104,25 @@ kernel-facing work.
 
 ## Tests
 
+The `oxinit` crate is Linux-only, so a bare `cargo build` or `cargo test` at the
+root fails on macOS. That is expected; the crate says so at compile time. Pass a
+target:
+
 ```bash
-cargo test -p oxinit-unit -p oxinit-graph   # host tests, no VM
-cargo xtask test-boot                       # boots QEMU, asserts on serial output
+cargo build --target x86_64-unknown-linux-musl -p oxinit
+cargo clippy --target x86_64-unknown-linux-musl -p oxinit -- -D warnings
 ```
 
-`oxinit-unit` and `oxinit-graph` have no Linux dependencies and run anywhere.
-Parser and graph logic belongs there, with tests, rather than in `oxinit`.
+Arriving with the milestones that introduce them:
+
+```bash
+cargo test -p oxinit-unit -p oxinit-graph   # M1: host tests, no VM
+cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
+```
+
+`oxinit-unit` and `oxinit-graph` will have no Linux dependencies and will run
+anywhere. Parser and graph logic belongs there, with tests, rather than in
+`oxinit`.
 
 `test-boot` boots with a timeout and matches expected lines in the serial log. A
 test that hangs fails on the timeout instead of blocking the run.
