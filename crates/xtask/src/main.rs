@@ -120,6 +120,10 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
             let bin = staging.join("bin");
             fs::create_dir_all(&bin).map_err(|e| format!("create {}: {e}", bin.display()))?;
             install(path, &bin.join("sh"))?;
+
+            if is_busybox(path) {
+                install_applets(path, &bin)?;
+            }
         }
         None => println!(
             "xtask: no shell in the image; oxinit will log a spawn failure for /bin/sh. \
@@ -139,6 +143,43 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
     run(Command::new("sh").arg("-c").arg(script))?;
 
     Ok(image)
+}
+
+/// Applets worth having in a debug shell. busybox is a multi-call binary: it
+/// picks its behaviour from argv[0], so without these names `ls` and `cat` do
+/// not exist and the shell can only run its own builtins.
+const APPLETS: &[&str] = &[
+    "cat", "ls", "ps", "sleep", "mount", "umount", "hostname", "grep", "poweroff", "reboot",
+    "dmesg", "kill", "mkdir", "echo",
+];
+
+/// Whether to treat this binary as busybox, by filename.
+///
+/// A heuristic, and deliberately a shallow one: the alternative is executing
+/// the binary to ask, which does not work when the host is not Linux — which
+/// is the case this whole cross-compiling setup exists for.
+fn is_busybox(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("busybox"))
+}
+
+/// Install busybox under its own name plus a symlink per applet.
+fn install_applets(shell: &Path, bin: &Path) -> Result<(), String> {
+    let busybox = bin.join("busybox");
+    install(shell, &busybox)?;
+
+    for applet in APPLETS {
+        let link = bin.join(applet);
+        let _ = fs::remove_file(&link);
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("busybox", &link)
+            .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+    }
+
+    println!("xtask: installed busybox with {} applets", APPLETS.len());
+    Ok(())
 }
 
 /// Copy a file into the staging tree and make it executable.
