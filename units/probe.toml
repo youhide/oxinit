@@ -1,0 +1,10 @@
+# Exercises the notify protocol: sends READY=1 and pings the watchdog.
+[unit]
+description = "sd_notify probe"
+
+[service]
+type         = "notify"
+exec         = "/bin/notify-probe"
+watchdog-sec = "3s"
+restart      = "on-failure"
+restart-sec  = "500ms"

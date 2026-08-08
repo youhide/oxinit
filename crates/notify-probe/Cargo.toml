@@ -1,0 +1,12 @@
+[package]
+name = "notify-probe"
+version = "0.0.0"
+description = "Test fixture: a service that speaks sd_notify"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A test fixture, not PID 1. The rules on the oxinit crate do not apply.
+[dependencies]

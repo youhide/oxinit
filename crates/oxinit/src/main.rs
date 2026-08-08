@@ -28,6 +28,7 @@ mod console;
 mod error;
 mod event;
 mod mounts;
+mod notify;
 mod reap;
 mod shell;
 mod supervisor;
@@ -104,11 +105,20 @@ fn boot() -> ! {
         }
     };
 
-    let mut supervisor = supervisor::Supervisor::load(&hostname, timers);
+    let notify = match notify::Notify::bind() {
+        Ok(notify) => notify,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            fallback(Some(&signals))
+        }
+    };
+
+    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify);
 
     let registered = events
         .register(&signals, event::Source::Signals)
-        .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer));
+        .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer))
+        .and_then(|()| events.register(supervisor.notify.as_fd(), event::Source::Notify));
 
     if let Err(e) = registered {
         eprintln!("oxinit: {e}");
@@ -153,6 +163,7 @@ fn run(
             let result = catch_unwind(AssertUnwindSafe(|| match source {
                 event::Source::Signals => on_signals(signals, supervisor, shell, &mut pending),
                 event::Source::Timer => supervisor.on_timer(),
+                event::Source::Notify => supervisor.on_notify(),
             }));
 
             if result.is_err() {

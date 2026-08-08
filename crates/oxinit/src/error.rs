@@ -40,6 +40,9 @@ pub enum Error {
     #[error("epoll: {0}")]
     Epoll(#[source] rustix::io::Errno),
 
+    #[error("notify socket: {0}")]
+    Notify(#[source] rustix::io::Errno),
+
     #[error("timerfd: {0}")]
     Timer(#[source] rustix::io::Errno),
 

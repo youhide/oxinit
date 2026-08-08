@@ -46,6 +46,9 @@ pub struct Service {
     pub exec: Vec<String>,
     pub restart: Restart,
     pub restart_sec: Duration,
+    /// How long the service may go without a `WATCHDOG=1` ping. `None`
+    /// disables the watchdog.
+    pub watchdog_sec: Option<Duration>,
     pub user: String,
     pub resources: Resources,
 }
@@ -132,6 +135,7 @@ struct RawService {
     exec: String,
     restart: Option<Restart>,
     restart_sec: Option<DurationValue>,
+    watchdog_sec: Option<DurationValue>,
     user: Option<String>,
 }
 
@@ -199,6 +203,13 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                     source,
                 })?;
 
+            let watchdog_sec = service.watchdog_sec.map(|value| value.0);
+            if watchdog_sec.is_some() && ty != ServiceType::Notify {
+                return Err(UnitError::WatchdogWithoutNotify {
+                    unit: name.to_owned(),
+                });
+            }
+
             Kind::Service(Service {
                 ty,
                 exec,
@@ -206,6 +217,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 restart_sec: service
                     .restart_sec
                     .map_or(DEFAULT_RESTART_SEC, |value| value.0),
+                watchdog_sec,
                 user,
                 resources: match raw.resources {
                     Some(res) => Resources {
@@ -314,6 +326,20 @@ tasks-max  = 512
     }
 
     #[test]
+    fn watchdog_requires_type_notify() {
+        let ok = "[service]\ntype = \"notify\"\nexec = \"/bin/true\"\nwatchdog-sec = \"30s\"\n";
+        let unit = parse_ok("x", ok);
+        assert_eq!(
+            unit.service().unwrap().watchdog_sec,
+            Some(Duration::from_secs(30))
+        );
+
+        // Nothing but notify has a channel to ping on.
+        let bad = "[service]\nexec = \"/bin/true\"\nwatchdog-sec = \"30s\"\n";
+        assert!(parse("x", bad, "h").is_err());
+    }
+
+    #[test]
     fn applies_documented_defaults() {
         let unit = parse_ok("x", "[service]\nexec = \"/bin/true\"\n");
         let service = unit.service().unwrap();
@@ -322,6 +348,7 @@ tasks-max  = 512
         assert_eq!(service.ty, ServiceType::Simple);
         assert_eq!(service.restart, Restart::No);
         assert_eq!(service.restart_sec, DEFAULT_RESTART_SEC);
+        assert_eq!(service.watchdog_sec, None, "watchdog is off by default");
         assert_eq!(service.user, "root");
         assert_eq!(service.resources, Resources::default());
         assert_eq!(unit.deps, Deps::default());

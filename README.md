@@ -81,13 +81,16 @@ service's cgroup.
 
 ## Current state
 
-Milestones 0 and 1 are done. oxinit boots under QEMU, mounts the
-pseudo-filesystems, reads signals from a signalfd, reaps orphans, parses TOML
-units, resolves their dependency graph, and starts them in a correct order —
-refusing to start at all if the graph has a cycle.
+Milestones 0 through 2 are done. oxinit boots under QEMU, mounts the
+pseudo-filesystems, multiplexes signalfd, timerfd, and the notify socket on one
+epoll loop, parses TOML units, resolves their dependency graph, starts them in
+order, restarts them with exponential backoff when they fail, waits for
+`READY=1` from `sd_notify` services, and kills the ones that miss a watchdog
+deadline.
 
-There is no supervision yet: no restart policies, no readiness protocol, no
-cgroups. Milestone 2 is next. [ROADMAP.md](ROADMAP.md) has the breakdown.
+No cgroups yet, so resource limits are parsed but not applied and
+`type = "forking"` is treated as `simple`. Milestone 3 is next.
+[ROADMAP.md](ROADMAP.md) has the breakdown.
 
 ## Running it
 
