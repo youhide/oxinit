@@ -8,6 +8,9 @@
 /bzImage
 /initramfs/
 
+# Personal, machine-local Claude Code notes
+CLAUDE.local.md
+
 # Editor and OS
 .DS_Store
 *.swp
