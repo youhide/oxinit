@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/notify-probe",
     "crates/oxinit",
     "crates/oxinit-graph",
     "crates/oxinit-service",

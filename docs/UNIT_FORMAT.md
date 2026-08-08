@@ -295,6 +295,23 @@ restart doubles the delay, capped at 5 minutes. The backoff resets once the
 service has been `Active` for longer than the current delay — without that, a
 service that fails once a week eventually takes hours to come back.
 
+### `watchdog-sec`
+
+- **Type:** duration string
+- **Required:** no
+- **Default:** none — the watchdog is disabled
+
+How long the service may go without sending `WATCHDOG=1` before oxinit
+considers it hung. The service is told the interval through `WATCHDOG_USEC` in
+its environment, and is expected to ping at roughly half that.
+
+Missing the deadline puts the unit in `Failed`, which means the `restart`
+policy applies exactly as it would to a crash — the point of a watchdog is to
+turn a hang, which nothing else detects, into a failure that does.
+
+Only meaningful with `type = "notify"`: nothing else has a channel to ping on.
+Setting it on another type is a load error.
+
 ### `user`
 
 - **Type:** string

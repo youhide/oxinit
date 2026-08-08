@@ -19,6 +19,8 @@ use crate::error::{Error, Result};
 pub enum Alarm {
     /// A unit's backoff has elapsed and it may start again.
     Restart { unit: String },
+    /// Time to check whether a unit has missed its watchdog deadline.
+    WatchdogCheck { unit: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -16,6 +16,10 @@
     clippy::indexing_slicing
 )]
 
+pub mod notify;
+
+pub use notify::Message;
+
 use std::fmt;
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -93,6 +97,10 @@ pub struct Instance {
     backoff: Duration,
     /// When the service last entered `Active`.
     active_since: Option<Instant>,
+    /// Last `STATUS=` from the service. Free text, shown by `oxctl status`.
+    pub status: Option<String>,
+    /// Last `WATCHDOG=1`. `None` when the service never pinged.
+    pub last_ping: Option<Instant>,
 }
 
 impl Instance {
@@ -108,6 +116,8 @@ impl Instance {
             restarts: 0,
             backoff,
             active_since: None,
+            status: None,
+            last_ping: None,
         }
     }
 
@@ -141,6 +151,17 @@ impl Instance {
     pub fn entered_active(&mut self) {
         self.state = State::Active;
         self.active_since = Some(Instant::now());
+        self.last_ping = Some(Instant::now());
+    }
+
+    /// A `WATCHDOG=1` ping.
+    pub fn pinged(&mut self) {
+        self.last_ping = Some(Instant::now());
+    }
+
+    /// Whether the service has missed its watchdog deadline.
+    pub fn watchdog_expired(&self, interval: Duration) -> bool {
+        self.state == State::Active && self.last_ping.is_some_and(|last| last.elapsed() > interval)
     }
 
     /// Decide what happens after the main process exits.
@@ -183,6 +204,7 @@ impl Instance {
     pub fn stopped(&mut self) {
         self.child = None;
         self.active_since = None;
+        self.status = None;
         self.state = State::Inactive;
     }
 }

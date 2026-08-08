@@ -26,6 +26,9 @@ pub enum UnitError {
     #[error("unit `{unit}`: [socket] is reserved for milestone 4 and not yet specified")]
     SocketReserved { unit: String },
 
+    #[error("unit `{unit}`: watchdog-sec needs type = \"notify\"; nothing else can ping")]
+    WatchdogWithoutNotify { unit: String },
+
     #[error("unit `{unit}`: [resources] applies to services only")]
     ResourcesOnNonService { unit: String },
 

@@ -1,0 +1,9 @@
+# Goes ready, then stops pinging. The watchdog must notice and kill it.
+[unit]
+description = "Hangs after going ready"
+
+[service]
+type         = "notify"
+exec         = "/bin/notify-probe --hang-after 2"
+watchdog-sec = "3s"
+restart      = "no"

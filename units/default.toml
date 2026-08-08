@@ -7,5 +7,5 @@
 [unit]
 description = "Default target"
 requires    = ["console"]
-wants       = ["banner", "flaky", "quiet", "absent"]
+wants       = ["banner", "quiet", "probe", "hangs", "absent"]
 after       = ["console", "banner"]

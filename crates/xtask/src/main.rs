@@ -57,11 +57,19 @@ fn usage() {
 
 /// Build a static `oxinit` and return the path to the binary.
 fn build() -> Result<PathBuf, String> {
+    build_package("oxinit")
+}
+
+fn build_package(package: &str) -> Result<PathBuf, String> {
     run(Command::new(cargo())
-        .args(["build", "--release", "--target", TARGET, "-p", "oxinit"])
+        .args(["build", "--release", "--target", TARGET, "-p", package])
         .current_dir(root()))?;
 
-    let binary = root().join("target").join(TARGET).join("release/oxinit");
+    let binary = root()
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join(package);
     if !binary.exists() {
         return Err(format!("expected a binary at {}", binary.display()));
     }
@@ -129,6 +137,12 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
             "xtask: no shell in the image; oxinit will log a spawn failure for /bin/sh. \
              Pass --shell PATH (busybox, statically linked) for a prompt."
         ),
+    }
+
+    // The notify test fixture. Only useful in a test image, and only there
+    // because nothing in busybox can send a unix datagram.
+    if let Ok(probe) = build_package("notify-probe") {
+        install(&probe, &staging.join("bin/notify-probe"))?;
     }
 
     // Units, if any. `/etc` rather than `/usr/lib`, since a hand-assembled

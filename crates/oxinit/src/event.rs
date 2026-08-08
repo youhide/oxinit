@@ -16,6 +16,8 @@ pub enum Source {
     Signals,
     /// At least one deadline has expired.
     Timer,
+    /// A service sent an sd_notify datagram.
+    Notify,
 }
 
 impl Source {
@@ -25,6 +27,7 @@ impl Source {
         match self {
             Source::Signals => 0,
             Source::Timer => 1,
+            Source::Notify => 2,
         }
     }
 
@@ -32,6 +35,7 @@ impl Source {
         match token {
             0 => Some(Source::Signals),
             1 => Some(Source::Timer),
+            2 => Some(Source::Notify),
             _ => None,
         }
     }
