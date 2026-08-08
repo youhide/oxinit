@@ -1,0 +1,6 @@
+[unit]
+description = "Boot banner"
+
+[service]
+type = "oneshot"
+exec = "/bin/echo oxinit-m1: banner on %H from %n"

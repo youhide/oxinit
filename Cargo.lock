@@ -44,6 +44,8 @@ name = "oxinit"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "oxinit-graph",
+ "oxinit-unit",
  "rustix",
  "thiserror",
 ]

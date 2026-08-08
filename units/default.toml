@@ -1,0 +1,11 @@
+# Started at the end of boot. Everything that should run is reachable from here.
+#
+# `after` is declared as well as `requires`: without it the target is a label
+# on a set, not a milestone, and would be reached before its units start.
+[target]
+
+[unit]
+description = "Default target"
+requires    = ["console"]
+wants       = ["banner", "absent"]
+after       = ["console", "banner"]

@@ -131,6 +131,30 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
         ),
     }
 
+    // Units, if any. `/etc` rather than `/usr/lib`, since a hand-assembled
+    // test image is the operator's, not a package's.
+    let units_src = root().join("units");
+    if units_src.is_dir() {
+        let units_dst = staging.join("etc/oxinit/units");
+        fs::create_dir_all(&units_dst)
+            .map_err(|e| format!("create {}: {e}", units_dst.display()))?;
+
+        let mut count = 0;
+        for entry in
+            fs::read_dir(&units_src).map_err(|e| format!("read {}: {e}", units_src.display()))?
+        {
+            let path = entry.map_err(|e| format!("read entry: {e}"))?.path();
+            if path.extension().is_some_and(|ext| ext == "toml") {
+                if let Some(name) = path.file_name() {
+                    fs::copy(&path, units_dst.join(name))
+                        .map_err(|e| format!("copy {}: {e}", path.display()))?;
+                    count += 1;
+                }
+            }
+        }
+        println!("xtask: installed {count} units from units/");
+    }
+
     let image = root().join("target/oxinit.cpio.gz");
 
     // bsdcpio and GNU cpio both accept `-o -H newc`, which is the format the

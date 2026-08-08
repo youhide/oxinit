@@ -1,0 +1,6 @@
+[unit]
+description = "Console shell"
+after       = ["banner"]
+
+[service]
+exec = "/bin/sh"
