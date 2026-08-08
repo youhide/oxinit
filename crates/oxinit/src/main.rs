@@ -25,6 +25,8 @@ use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::{Child, ExitCode};
 
+use crate::error::{Error, Result};
+
 /// `SIGCHLD` is the only signal M0 acts on. The rest are read and discarded so
 /// they cannot accumulate on the signalfd.
 const SIGCHLD: u32 = libc::SIGCHLD as u32;
@@ -61,10 +63,10 @@ fn boot() -> ! {
     // From here on, signals are event loop input rather than interruptions.
     // Blocking must happen before the signalfd is created: a signal that is
     // not blocked is delivered normally and never reaches the fd.
-    let signals = match sys::raw::block_all_signals().and_then(|()| sys::raw::signalfd_all()) {
+    let signals = match open_signalfd() {
         Ok(fd) => Some(fd),
         Err(e) => {
-            eprintln!("oxinit: signalfd unavailable ({e}); running without signal handling");
+            eprintln!("oxinit: {e}; running without signal handling");
             None
         }
     };
@@ -85,6 +87,15 @@ fn boot() -> ! {
     }
 }
 
+/// Block every signal, then open the signalfd that replaces them.
+///
+/// Order matters: a signal that is not blocked is delivered normally and never
+/// reaches the fd.
+fn open_signalfd() -> Result<OwnedFd> {
+    sys::raw::block_all_signals().map_err(Error::BlockSignals)?;
+    sys::raw::signalfd_all().map_err(Error::SignalFd)
+}
+
 /// The M0 event loop.
 ///
 /// One descriptor, so a blocking read is the whole of it. epoll arrives in M1
@@ -93,7 +104,8 @@ fn supervise(signals: OwnedFd, child: &mut Option<Child>) -> ! {
     let mut pending = Vec::new();
 
     loop {
-        if let Err(e) = sys::raw::read_signals(&signals, &mut pending) {
+        if let Err(e) = sys::raw::read_signals(&signals, &mut pending).map_err(Error::ReadSignalFd)
+        {
             eprintln!("oxinit: {e}");
             // A failing signalfd would spin this loop at full speed. Drop to
             // the degraded path instead, which at least paces itself.

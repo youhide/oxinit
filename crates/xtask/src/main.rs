@@ -21,6 +21,7 @@ fn main() {
     let result = match cmd.as_str() {
         "boot" => boot(&rest),
         "build" => build().map(|path| println!("{}", path.display())),
+        "image" => image(&rest).map(|path| println!("{}", path.display())),
         "" | "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -39,6 +40,7 @@ usage: cargo xtask <command>
 
 commands:
   build    build oxinit for x86_64-unknown-linux-musl
+  image    build and pack an initramfs, printing its path; does not boot
   boot     build, pack an initramfs, and boot it under QEMU
 
 boot options:
@@ -66,11 +68,17 @@ fn build() -> Result<PathBuf, String> {
     Ok(binary)
 }
 
-fn boot(args: &[String]) -> Result<(), String> {
-    let kernel = find_kernel(args)?;
+/// Build and pack, without booting. Used by `boot`, and on its own by anything
+/// that wants to drive QEMU itself.
+fn image(args: &[String]) -> Result<PathBuf, String> {
     let shell = find_shell(args)?;
     let binary = build()?;
-    let image = pack_initramfs(&binary, shell.as_deref())?;
+    pack_initramfs(&binary, shell.as_deref())
+}
+
+fn boot(args: &[String]) -> Result<(), String> {
+    let kernel = find_kernel(args)?;
+    let image = image(args)?;
 
     println!(
         "xtask: booting {} with {}",
