@@ -9,26 +9,39 @@ may change between any two milestones.
 
 ## M0 — Minimal PID 1
 
-**In progress.**
+**Done.**
 
 The smallest program that can be PID 1 without the kernel panicking.
 
-- [ ] Verify `getpid() == 1`; exit with an error otherwise.
-- [ ] Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/run`, and
+- [x] Verify `getpid() == 1`; exit with an error otherwise.
+- [x] Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/run`, and
       `/sys/fs/cgroup`. Already-mounted is not an error.
-- [ ] Open `/dev/console` and `dup2` it onto fds 0, 1, 2.
-- [ ] Block all signals with `sigprocmask`; create a `signalfd`.
-- [ ] Reap loop: on `SIGCHLD`, `waitpid(-1, WNOHANG)` until it returns 0 or
+- [x] Open `/dev/console` and `dup2` it onto fds 0, 1, 2.
+- [x] Block all signals with `sigprocmask`; create a `signalfd`.
+- [x] Reap loop: on `SIGCHLD`, `waitpid(-1, WNOHANG)` until it returns 0 or
       `ECHILD`.
-- [ ] Spawn `/bin/sh` on the console and respawn it when it exits.
-- [ ] `cargo xtask boot` — musl build, cpio initramfs, QEMU.
-- [ ] Never exit. Never `panic = "abort"`.
+- [x] Spawn `/bin/sh` on the console and respawn it when it exits.
+- [x] `cargo xtask boot` — musl build, cpio initramfs, QEMU.
+- [x] Never exit. Never `panic = "abort"`.
 
-Roughly 150 lines. It gets a shell prompt in QEMU and does not leak zombies.
+Verified under QEMU with an Alpine 6.18 kernel: the guest reaches
+`Run /init as init process` and gets a shell prompt, `/proc/1/comm` is the
+oxinit binary, `hostname` is `localhost`, `/sys/fs/cgroup/cgroup.controllers`
+reads back the v2 controller set, an orphaned process leaves no zombie, and
+oxinit logs nothing — every mount, the console, the hostname, the signalfd,
+and the shell spawn all succeeded.
+
+No epoll in M0. With one descriptor there is nothing to multiplex, so the loop
+is a blocking read on the signalfd; epoll arrives in M1 with the second fd.
+
+Known gap, deferred: the shell has no controlling terminal, so busybox reports
+"can't access tty; job control turned off". Fixing it needs `setsid` plus
+`TIOCSCTTY` on the child, which belongs with the rest of the console and
+signal work in M5.
 
 ## M1 — Units and dependency resolution
 
-**Not started.**
+**Next.**
 
 - [ ] TOML unit parsing in `oxinit-unit`, per
       [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md).

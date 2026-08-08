@@ -81,9 +81,12 @@ service's cgroup.
 
 ## Current state
 
-Milestone 0 — a minimal PID 1 that mounts the pseudo-filesystems, spawns a
-shell, reaps children, and boots under QEMU — is in progress. Everything else is
-unstarted. [ROADMAP.md](ROADMAP.md) has the breakdown.
+Milestone 0 is done: a minimal PID 1 that mounts the pseudo-filesystems, wires
+the console, blocks signals and reads them from a signalfd, supervises a shell,
+and reaps orphans. It boots under QEMU and gets a prompt.
+
+There are no units, no dependency graph, and no cgroups yet — milestone 1 is
+next. [ROADMAP.md](ROADMAP.md) has the breakdown.
 
 ## Running it
 

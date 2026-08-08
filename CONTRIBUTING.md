@@ -59,7 +59,7 @@ cargo xtask boot
 ```
 
 This builds a static `oxinit` for `x86_64-unknown-linux-musl`, packs it as
-`/init` into a single-file cpio initramfs, and boots:
+`/init` into a cpio initramfs, and boots:
 
 ```bash
 qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "console=ttyS0"
@@ -67,6 +67,16 @@ qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "co
 
 Edit to boot takes a few seconds. `-nographic` puts the guest serial console on
 your terminal. `Ctrl-A X` exits QEMU. `Ctrl-C` goes to the guest, not to QEMU.
+
+The image holds only `/init` unless you give it a shell:
+
+```bash
+cargo xtask boot --shell /path/to/busybox
+```
+
+It must be statically linked, since the image has no libraries. Without it the
+boot still exercises the mounts, console, signalfd, and reap loop, but oxinit
+has nothing to supervise and logs a spawn failure for `/bin/sh`.
 
 Use this loop rather than reasoning about whether the boot path works. Early
 boot has too many ways to fail silently.
@@ -94,13 +104,25 @@ kernel-facing work.
 
 ## Tests
 
+The `oxinit` crate is Linux-only, so a bare `cargo build` or `cargo test` at the
+root fails on macOS. That is expected; the crate says so at compile time. Pass a
+target:
+
 ```bash
-cargo test -p oxinit-unit -p oxinit-graph   # host tests, no VM
-cargo xtask test-boot                       # boots QEMU, asserts on serial output
+cargo build --target x86_64-unknown-linux-musl -p oxinit
+cargo clippy --target x86_64-unknown-linux-musl -p oxinit -- -D warnings
 ```
 
-`oxinit-unit` and `oxinit-graph` have no Linux dependencies and run anywhere.
-Parser and graph logic belongs there, with tests, rather than in `oxinit`.
+Arriving with the milestones that introduce them:
+
+```bash
+cargo test -p oxinit-unit -p oxinit-graph   # M1: host tests, no VM
+cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
+```
+
+`oxinit-unit` and `oxinit-graph` will have no Linux dependencies and will run
+anywhere. Parser and graph logic belongs there, with tests, rather than in
+`oxinit`.
 
 `test-boot` boots with a timeout and matches expected lines in the serial log. A
 test that hangs fails on the timeout instead of blocking the run.

@@ -1,0 +1,16 @@
+[package]
+name = "oxinit"
+version = "0.0.0"
+description = "PID 1 and service manager"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Syscalls go through rustix. libc is here only for signalfd and sigprocmask,
+# which rustix does not cover, and is used only from `sys::raw`.
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "mount", "process", "stdio", "system"] }
+thiserror.workspace = true
