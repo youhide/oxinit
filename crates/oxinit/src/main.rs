@@ -30,6 +30,7 @@ mod mounts;
 mod reap;
 mod shell;
 mod sys;
+mod units;
 
 use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -66,9 +67,13 @@ fn boot() -> ! {
         eprintln!("oxinit: {e}");
     }
 
-    if let Err(e) = mounts::set_hostname() {
-        eprintln!("oxinit: {e}");
-    }
+    let hostname = match mounts::set_hostname() {
+        Ok(name) => name,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            "localhost".to_owned()
+        }
+    };
 
     // From here on, signals are event loop input rather than interruptions.
     // Blocking must happen before the signalfd is created: a signal that is
@@ -81,19 +86,29 @@ fn boot() -> ! {
         }
     };
 
-    let mut child = match shell::spawn() {
-        Ok(child) => Some(child),
-        Err(e) => {
-            eprintln!("oxinit: {e}");
-            None
+    let started = units::boot(&hostname);
+
+    // With no units to supervise there is nothing to do but keep the machine
+    // usable, which is what M0 did. Once units exist the shell is no longer
+    // spawned automatically; a unit can ask for one.
+    let mut child = if started.is_empty() {
+        eprintln!("oxinit: nothing started; falling back to a console shell");
+        match shell::spawn() {
+            Ok(child) => Some(child),
+            Err(e) => {
+                eprintln!("oxinit: {e}");
+                None
+            }
         }
+    } else {
+        None
     };
 
     match signals {
-        Some(fd) => supervise(fd, &mut child),
+        Some(fd) => supervise(fd, &mut child, started),
         // Without a signalfd there is nothing to wait on, so fall back to
         // polling. Degraded, but still a running init rather than a panic.
-        None => poll_forever(&mut child),
+        None => poll_forever(&mut child, &started),
     }
 }
 
@@ -110,7 +125,7 @@ fn open_signalfd() -> Result<OwnedFd> {
 ///
 /// One descriptor, so a blocking read is the whole of it. epoll arrives in M1
 /// with the second descriptor; multiplexing one fd would be ceremony.
-fn supervise(signals: OwnedFd, child: &mut Option<Child>) -> ! {
+fn supervise(signals: OwnedFd, child: &mut Option<Child>, started: Vec<units::Started>) -> ! {
     let mut pending = Vec::new();
 
     loop {
@@ -119,7 +134,7 @@ fn supervise(signals: OwnedFd, child: &mut Option<Child>) -> ! {
             eprintln!("oxinit: {e}");
             // A failing signalfd would spin this loop at full speed. Drop to
             // the degraded path instead, which at least paces itself.
-            poll_forever(child);
+            poll_forever(child, &started);
         }
 
         for signal in &pending {
@@ -132,7 +147,7 @@ fn supervise(signals: OwnedFd, child: &mut Option<Child>) -> ! {
             // Option<Child>` across the boundary, which is why this needs
             // AssertUnwindSafe: if the handler panics mid-update, `child` may
             // be stale. Stale is survivable — the next SIGCHLD corrects it.
-            if catch_unwind(AssertUnwindSafe(|| on_sigchld(child))).is_err() {
+            if catch_unwind(AssertUnwindSafe(|| on_sigchld(child, &started))).is_err() {
                 eprintln!("oxinit: SIGCHLD handler panicked; continuing");
             }
         }
@@ -141,17 +156,25 @@ fn supervise(signals: OwnedFd, child: &mut Option<Child>) -> ! {
 
 /// Reap everything that exited, and put the shell back if it was the one that
 /// died.
-fn on_sigchld(child: &mut Option<Child>) {
-    let dead_shell = reap::reap_all().into_iter().any(|(pid, status)| {
-        let is_shell = child
-            .as_ref()
-            .is_some_and(|c| c.id() == pid.as_raw_nonzero().get() as u32);
+fn on_sigchld(child: &mut Option<Child>, started: &[units::Started]) {
+    let mut dead_shell = false;
 
-        if is_shell {
+    for (pid, status) in reap::reap_all() {
+        let raw = pid.as_raw_nonzero().get() as u32;
+
+        if child.as_ref().is_some_and(|c| c.id() == raw) {
             eprintln!("oxinit: {} {}", shell::SHELL, reap::describe(&status));
+            dead_shell = true;
+            continue;
         }
-        is_shell
-    });
+
+        // A pid belonging to no unit is an orphan the machine reparented here;
+        // reaping it is the whole job. For a unit, M1 reports and moves on —
+        // restart policy, backoff, and marking it failed are M2.
+        if let Some(unit) = units::unit_for_pid(started, raw) {
+            println!("oxinit: {unit} {}", reap::describe(&status));
+        }
+    }
 
     if dead_shell {
         *child = match shell::spawn() {
@@ -168,12 +191,12 @@ fn on_sigchld(child: &mut Option<Child>) {
 ///
 /// Blocking `wait` with no `NOHANG`, so this sleeps in the kernel rather than
 /// spinning, and still reaps whatever the machine orphans.
-fn poll_forever(child: &mut Option<Child>) -> ! {
+fn poll_forever(child: &mut Option<Child>, started: &[units::Started]) -> ! {
     loop {
         match rustix::process::wait(rustix::process::WaitOptions::empty()) {
             // Blocking wait, so this only returns when something actually
             // exited. Reap the rest and restore the shell if it was the one.
-            Ok(Some(_)) => on_sigchld(child),
+            Ok(Some(_)) => on_sigchld(child, started),
 
             // No children to wait for, or the wait itself failed. Either way
             // there is nothing to block on, so pace the loop before retrying;

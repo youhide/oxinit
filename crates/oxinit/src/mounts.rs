@@ -102,7 +102,9 @@ fn mount_one(spec: &Spec) -> Result<()> {
 }
 
 /// Read the hostname from `/etc/hostname`, falling back to `localhost`.
-pub fn set_hostname() -> Result<()> {
+///
+/// Returns the name it set, which also feeds the `%H` unit specifier.
+pub fn set_hostname() -> Result<String> {
     let raw = std::fs::read("/etc/hostname").unwrap_or_default();
     let name = raw
         .split(|b| *b == b'\n')
@@ -110,5 +112,6 @@ pub fn set_hostname() -> Result<()> {
         .filter(|line| !line.is_empty())
         .unwrap_or(b"localhost");
 
-    rustix::system::sethostname(name).map_err(Error::Hostname)
+    rustix::system::sethostname(name).map_err(Error::Hostname)?;
+    Ok(String::from_utf8_lossy(name).into_owned())
 }

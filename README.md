@@ -81,12 +81,13 @@ service's cgroup.
 
 ## Current state
 
-Milestone 0 is done: a minimal PID 1 that mounts the pseudo-filesystems, wires
-the console, blocks signals and reads them from a signalfd, supervises a shell,
-and reaps orphans. It boots under QEMU and gets a prompt.
+Milestones 0 and 1 are done. oxinit boots under QEMU, mounts the
+pseudo-filesystems, reads signals from a signalfd, reaps orphans, parses TOML
+units, resolves their dependency graph, and starts them in a correct order —
+refusing to start at all if the graph has a cycle.
 
-There are no units, no dependency graph, and no cgroups yet — milestone 1 is
-next. [ROADMAP.md](ROADMAP.md) has the breakdown.
+There is no supervision yet: no restart policies, no readiness protocol, no
+cgroups. Milestone 2 is next. [ROADMAP.md](ROADMAP.md) has the breakdown.
 
 ## Running it
 

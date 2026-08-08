@@ -1,0 +1,14 @@
+[package]
+name = "oxinit-graph"
+version = "0.0.0"
+description = "Dependency resolution and start ordering"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No Linux dependencies. Graph bugs are found on the host, not in a VM.
+[dependencies]
+oxinit-unit = { path = "../oxinit-unit" }
+thiserror.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "oxinit-unit"
+version = "0.0.0"
+description = "Unit file parsing and validation"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No Linux dependencies. This crate is where the parser bugs are, and it must
+# be testable on any host without a VM.
+[dependencies]
+basic-toml.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true

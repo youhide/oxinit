@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oxinit", "crates/xtask"]
+members = ["crates/oxinit", "crates/oxinit-graph", "crates/oxinit-unit", "crates/xtask"]
 
 [workspace.package]
 edition = "2021"
@@ -10,8 +10,14 @@ repository = "https://github.com/youhide/oxinit"
 publish = false
 
 [workspace.dependencies]
+# basic-toml over toml: it pulls serde and nothing else, where toml adds
+# serde_spanned, toml_datetime, and a parser stack. Units need none of that —
+# no datetimes, no spans, no format-preserving edits — and this tree ends up
+# inside PID 1.
+basic-toml = "0.1"
 libc = "0.2"
 rustix = "1.1"
+serde = "1"
 thiserror = "2"
 
 [profile.release]

@@ -41,27 +41,37 @@ signal work in M5.
 
 ## M1 — Units and dependency resolution
 
-**Next.**
+**Done.**
 
-- [ ] TOML unit parsing in `oxinit-unit`, per
+- [x] TOML unit parsing in `oxinit-unit`, per
       [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md).
-- [ ] Unit kinds: `[service]` and `[target]`, exactly one per unit.
-- [ ] Duration and size string parsers.
-- [ ] Directory precedence: `/etc/oxinit/units/` over
+- [x] Unit kinds: `[service]` and `[target]`, exactly one per unit.
+- [x] Duration and size string parsers.
+- [x] Directory precedence: `/etc/oxinit/units/` over
       `/usr/lib/oxinit/units/`.
-- [ ] Dependency graph in `oxinit-graph`: `requires`, `wants`, `after`,
+- [x] Dependency graph in `oxinit-graph`: `requires`, `wants`, `after`,
       `before`, `conflicts`.
-- [ ] Kahn topological sort over the ordering edges.
-- [ ] Cycle detection that reports the cycle path and refuses to load.
-- [ ] Sequential start of the resolved order.
-- [ ] Unit tests for the parser and the graph, running on the host.
+- [x] Kahn topological sort over the ordering edges.
+- [x] Cycle detection that reports the cycle path and refuses to load.
+- [x] Sequential start of the resolved order.
+- [x] Unit tests for the parser and the graph, running on the host.
 
-At the end of M1, oxinit starts a set of services in a correct order and
-refuses to start with a broken configuration.
+Verified under QEMU. A three-unit set starts in declared order, a `wants` on a
+missing unit warns without blocking, `%H` and `%n` expand, a `oneshot` exit is
+reported, and a deliberately introduced cycle is refused with its path —
+`banner -> console -> banner` — after which PID 1 falls back to a console shell
+rather than exiting.
+
+52 host tests across the two library crates, no VM needed.
+
+Deferred out of M1: `user` is parsed and validated but not applied. Dropping
+privilege needs setgid, initgroups, and setuid against `/etc/passwd`. Until
+that lands, a service declaring a non-root `user` is refused rather than
+silently run as root.
 
 ## M2 — Supervision
 
-**Not started.**
+**Next.**
 
 - [ ] Service state machine: `Inactive`, `Activating`, `Active`,
       `Deactivating`, `Failed`, `Restarting`.

@@ -36,8 +36,23 @@ A unit's **fully-qualified name** is `<name>.<kind>` — `sshd.service`,
 
 `[target]` takes no keys. A target exists only to be depended on: it groups
 units so that `requires = ["multi-user"]` pulls in a set rather than a list.
-Targets have no process, no cgroup, and no `[resources]`. A target is `Active`
-once every unit that `requires` it is done activating.
+Targets have no process, no cgroup, and no `[resources]`.
+
+A target is **not** implicitly ordered after the units it pulls in. The rule
+that `requires` creates no ordering has no exception for targets, so a target
+that lists ten services is reached at whatever point the ordering constraints
+allow — possibly before any of them have started. If you want a target to mean
+"all of this is up", order it explicitly:
+
+```toml
+[target]
+
+[unit]
+requires = ["network", "sshd"]
+after    = ["network", "sshd"]
+```
+
+Without the `after`, the target is a label on a set, not a milestone.
 
 The unit named `default` is started at the end of boot. It is normally a target.
 Every service that should run on this machine is reachable from it, directly or

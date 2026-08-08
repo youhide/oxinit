@@ -1,0 +1,7 @@
+# The crates linked into PID 1 deny unwrap, expect, panic, and indexing. Tests
+# are not linked into PID 1 and a failing assertion is the point of a test, so
+# the restriction stops at the test boundary.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
