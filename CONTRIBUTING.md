@@ -59,7 +59,7 @@ cargo xtask boot
 ```
 
 This builds a static `oxinit` for `x86_64-unknown-linux-musl`, packs it as
-`/init` into a single-file cpio initramfs, and boots:
+`/init` into a cpio initramfs, and boots:
 
 ```bash
 qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "console=ttyS0"
@@ -67,6 +67,16 @@ qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "co
 
 Edit to boot takes a few seconds. `-nographic` puts the guest serial console on
 your terminal. `Ctrl-A X` exits QEMU. `Ctrl-C` goes to the guest, not to QEMU.
+
+The image holds only `/init` unless you give it a shell:
+
+```bash
+cargo xtask boot --shell /path/to/busybox
+```
+
+It must be statically linked, since the image has no libraries. Without it the
+boot still exercises the mounts, console, signalfd, and reap loop, but oxinit
+has nothing to supervise and logs a spawn failure for `/bin/sh`.
 
 Use this loop rather than reasoning about whether the boot path works. Early
 boot has too many ways to fail silently.

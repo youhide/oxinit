@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/oxinit", "crates/xtask"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/youhide/oxinit"
+publish = false
+
+[workspace.dependencies]
+libc = "0.2"
+rustix = "1.1"
+thiserror = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# Never "abort". An abort in PID 1 is a kernel panic; unwinding gives
+# catch_unwind at the event loop boundary a chance to recover.
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

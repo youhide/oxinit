@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Build and boot automation"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# xtask runs on the developer's machine, not in PID 1. None of the constraints
+# on the `oxinit` crate apply here.
+[dependencies]

@@ -421,7 +421,10 @@ errors are, and they should not require a VM to exercise.
 `cargo xtask boot`:
 
 1. Builds `oxinit` for `x86_64-unknown-linux-musl`, statically linked.
-2. Packs a single-file cpio initramfs — the binary at `/init`.
+2. Packs a cpio initramfs — the binary at `/init`, and nothing else unless
+   `--shell PATH` adds a statically linked shell at `/bin/sh`. Without one the
+   image boots and exercises the mount, console, signalfd, and reap paths, but
+   oxinit has no shell to supervise and logs a spawn failure.
 3. Boots it:
 
 ```bash
