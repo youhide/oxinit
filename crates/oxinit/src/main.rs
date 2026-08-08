@@ -26,11 +26,13 @@ compile_error!(
 
 mod console;
 mod error;
+mod event;
 mod mounts;
 mod reap;
 mod shell;
+mod supervisor;
 mod sys;
-mod units;
+mod timer;
 
 use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -59,7 +61,7 @@ fn main() -> ExitCode {
 fn boot() -> ! {
     for failure in mounts::mount_all() {
         // Nothing has a console yet, so this is only visible if the kernel
-        // left stderr usable. Logged again below once the console is attached.
+        // left stderr usable.
         eprintln!("oxinit: {failure}");
     }
 
@@ -75,138 +77,154 @@ fn boot() -> ! {
         }
     };
 
-    // From here on, signals are event loop input rather than interruptions.
-    // Blocking must happen before the signalfd is created: a signal that is
-    // not blocked is delivered normally and never reaches the fd.
+    // Signals become event loop input rather than interruptions. Blocking must
+    // happen before the signalfd is created: a signal that is not blocked is
+    // delivered normally and never reaches the fd.
     let signals = match open_signalfd() {
-        Ok(fd) => Some(fd),
+        Ok(fd) => fd,
         Err(e) => {
-            eprintln!("oxinit: {e}; running without signal handling");
-            None
+            eprintln!("oxinit: {e}");
+            fallback(None)
         }
     };
 
-    let started = units::boot(&hostname);
-
-    // With no units to supervise there is nothing to do but keep the machine
-    // usable, which is what M0 did. Once units exist the shell is no longer
-    // spawned automatically; a unit can ask for one.
-    let mut child = if started.is_empty() {
-        eprintln!("oxinit: nothing started; falling back to a console shell");
-        match shell::spawn() {
-            Ok(child) => Some(child),
-            Err(e) => {
-                eprintln!("oxinit: {e}");
-                None
-            }
+    let timers = match timer::Timers::new() {
+        Ok(timers) => timers,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            fallback(Some(&signals))
         }
+    };
+
+    let mut events = match event::EventLoop::new() {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            fallback(Some(&signals))
+        }
+    };
+
+    let mut supervisor = supervisor::Supervisor::load(&hostname, timers);
+
+    let registered = events
+        .register(&signals, event::Source::Signals)
+        .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer));
+
+    if let Err(e) = registered {
+        eprintln!("oxinit: {e}");
+        fallback(Some(&signals));
+    }
+
+    // With nothing to supervise, keep the machine usable the way M0 did.
+    let mut shell = if supervisor.is_empty() {
+        eprintln!("oxinit: nothing to start; falling back to a console shell");
+        shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok()
     } else {
+        supervisor.start_all();
         None
     };
 
-    match signals {
-        Some(fd) => supervise(fd, &mut child, started),
-        // Without a signalfd there is nothing to wait on, so fall back to
-        // polling. Degraded, but still a running init rather than a panic.
-        None => poll_forever(&mut child, &started),
+    run(&mut events, &signals, &mut supervisor, &mut shell)
+}
+
+/// The event loop.
+fn run(
+    events: &mut event::EventLoop,
+    signals: &OwnedFd,
+    supervisor: &mut supervisor::Supervisor,
+    shell: &mut Option<Child>,
+) -> ! {
+    let mut sources = Vec::new();
+    let mut pending = Vec::new();
+
+    loop {
+        if let Err(e) = events.wait(&mut sources) {
+            eprintln!("oxinit: {e}");
+            // A failing epoll would spin this loop at full speed.
+            fallback(Some(signals));
+        }
+
+        for source in &sources {
+            // A panic inside a handler unwinds to here, gets logged, and the
+            // loop continues with the next event. AssertUnwindSafe because the
+            // handlers hold &mut state across the boundary: a panic mid-update
+            // can leave that state stale, which is survivable — the next event
+            // corrects it — where letting the panic escape is not.
+            let result = catch_unwind(AssertUnwindSafe(|| match source {
+                event::Source::Signals => on_signals(signals, supervisor, shell, &mut pending),
+                event::Source::Timer => supervisor.on_timer(),
+            }));
+
+            if result.is_err() {
+                eprintln!("oxinit: handler panicked; continuing");
+            }
+        }
+    }
+}
+
+fn on_signals(
+    signals: &OwnedFd,
+    supervisor: &mut supervisor::Supervisor,
+    shell: &mut Option<Child>,
+    pending: &mut Vec<u32>,
+) {
+    if let Err(e) = sys::raw::read_signals(signals, pending).map_err(Error::ReadSignalFd) {
+        eprintln!("oxinit: {e}");
+        return;
+    }
+
+    for signal in pending.iter() {
+        if *signal != SIGCHLD {
+            // PID 1 has no default dispositions, so everything else is read
+            // and dropped rather than ignored by accident. Acting on SIGTERM
+            // and friends is M5.
+            continue;
+        }
+
+        // The fallback shell is not a unit, so it is checked separately and
+        // respawned directly.
+        if let Some(child) = shell.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                eprintln!("oxinit: {} exited; respawning", shell::SHELL);
+                *shell = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+            }
+        }
+
+        supervisor.on_sigchld();
     }
 }
 
 /// Block every signal, then open the signalfd that replaces them.
-///
-/// Order matters: a signal that is not blocked is delivered normally and never
-/// reaches the fd.
 fn open_signalfd() -> Result<OwnedFd> {
     sys::raw::block_all_signals().map_err(Error::BlockSignals)?;
     sys::raw::signalfd_all().map_err(Error::SignalFd)
 }
 
-/// The M0 event loop.
-///
-/// One descriptor, so a blocking read is the whole of it. epoll arrives in M1
-/// with the second descriptor; multiplexing one fd would be ceremony.
-fn supervise(signals: OwnedFd, child: &mut Option<Child>, started: Vec<units::Started>) -> ! {
+/// Last resort. The loop cannot continue, so give an operator a shell and keep
+/// reaping. PID 1 exiting is a kernel panic, so this never returns.
+fn fallback(signals: Option<&OwnedFd>) -> ! {
+    eprintln!("oxinit: event loop unavailable; falling back to a console shell");
+    let mut child = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
     let mut pending = Vec::new();
 
     loop {
-        if let Err(e) = sys::raw::read_signals(&signals, &mut pending).map_err(Error::ReadSignalFd)
-        {
-            eprintln!("oxinit: {e}");
-            // A failing signalfd would spin this loop at full speed. Drop to
-            // the degraded path instead, which at least paces itself.
-            poll_forever(child, &started);
+        // Prefer the signalfd if there is one, so this still sleeps in the
+        // kernel rather than spinning.
+        match signals {
+            Some(fd) => {
+                let _ = sys::raw::read_signals(fd, &mut pending);
+            }
+            None => std::thread::sleep(std::time::Duration::from_secs(1)),
         }
 
-        for signal in &pending {
-            if *signal != SIGCHLD {
-                continue;
-            }
+        let dead = reap::reap_all().into_iter().any(|(pid, _)| {
+            child
+                .as_ref()
+                .is_some_and(|c| c.id() == pid.as_raw_nonzero().get() as u32)
+        });
 
-            // A panic inside the handler unwinds to here, gets logged, and the
-            // loop continues with the next event. The closure holds `&mut
-            // Option<Child>` across the boundary, which is why this needs
-            // AssertUnwindSafe: if the handler panics mid-update, `child` may
-            // be stale. Stale is survivable — the next SIGCHLD corrects it.
-            if catch_unwind(AssertUnwindSafe(|| on_sigchld(child, &started))).is_err() {
-                eprintln!("oxinit: SIGCHLD handler panicked; continuing");
-            }
-        }
-    }
-}
-
-/// Reap everything that exited, and put the shell back if it was the one that
-/// died.
-fn on_sigchld(child: &mut Option<Child>, started: &[units::Started]) {
-    let mut dead_shell = false;
-
-    for (pid, status) in reap::reap_all() {
-        let raw = pid.as_raw_nonzero().get() as u32;
-
-        if child.as_ref().is_some_and(|c| c.id() == raw) {
-            eprintln!("oxinit: {} {}", shell::SHELL, reap::describe(&status));
-            dead_shell = true;
-            continue;
-        }
-
-        // A pid belonging to no unit is an orphan the machine reparented here;
-        // reaping it is the whole job. For a unit, M1 reports and moves on —
-        // restart policy, backoff, and marking it failed are M2.
-        if let Some(unit) = units::unit_for_pid(started, raw) {
-            println!("oxinit: {unit} {}", reap::describe(&status));
-        }
-    }
-
-    if dead_shell {
-        *child = match shell::spawn() {
-            Ok(new) => Some(new),
-            Err(e) => {
-                eprintln!("oxinit: {e}");
-                None
-            }
-        };
-    }
-}
-
-/// Degraded loop for when the signalfd is gone.
-///
-/// Blocking `wait` with no `NOHANG`, so this sleeps in the kernel rather than
-/// spinning, and still reaps whatever the machine orphans.
-fn poll_forever(child: &mut Option<Child>, started: &[units::Started]) -> ! {
-    loop {
-        match rustix::process::wait(rustix::process::WaitOptions::empty()) {
-            // Blocking wait, so this only returns when something actually
-            // exited. Reap the rest and restore the shell if it was the one.
-            Ok(Some(_)) => on_sigchld(child, started),
-
-            // No children to wait for, or the wait itself failed. Either way
-            // there is nothing to block on, so pace the loop before retrying;
-            // without the sleep this spins a core at 100%.
-            _ => {
-                if child.is_none() {
-                    *child = shell::spawn().ok();
-                }
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
+        if dead || child.is_none() {
+            child = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
         }
     }
 }

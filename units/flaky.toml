@@ -1,0 +1,9 @@
+# Exits non-zero immediately, forever. Exercises on-failure plus backoff:
+# the delays should be 200ms, 400ms, 800ms, ... doubling each time.
+[unit]
+description = "Always fails"
+
+[service]
+exec        = "/bin/false"
+restart     = "on-failure"
+restart-sec = "200ms"

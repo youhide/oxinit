@@ -125,6 +125,37 @@ project's implementation rather than by a document, and the subset you implement
 is never the one your distribution actually uses. Units are TOML, specified
 here, and that is the whole surface.
 
+### Linux only
+
+Not incidentally — the mechanisms oxinit is built on have no portable
+equivalent:
+
+| Job | Mechanism | Elsewhere |
+|---|---|---|
+| Track a service's processes | cgroup v2 | jails/rctl on FreeBSD; a different model |
+| Signals as event loop input | `signalfd` | `kqueue` + `EVFILT_SIGNAL` |
+| Multiplexing | `epoll` | `kqueue` |
+| Deadlines | `timerfd` | `EVFILT_TIMER` |
+| Sender identity on a socket | `SO_PASSCRED` / `SCM_CREDENTIALS` | `LOCAL_PEERCRED` / `SCM_CREDS` |
+| Boot filesystems | devtmpfs, procfs, sysfs | devfs, no sysfs |
+
+`cgroup.kill` and the `populated` key of `cgroup.events` are what make
+`type = "forking"` tractable at all, and they have no direct analogue.
+
+macOS is not a question of effort: `launchd` is PID 1, SIP prevents replacing
+it, and there is no interface to substitute an init.
+
+A FreeBSD port is possible in principle — `init_path` is settable — but it
+would be a different program. It would, however, reuse `oxinit-unit`,
+`oxinit-graph`, and `oxinit-service`, which have no OS dependency at all: the
+unit format, the dependency semantics, the topological ordering, and the
+restart policy are all portable and test on any host today. Only the system
+layer is Linux-bound.
+
+None of that is planned. Getting one platform right comes first.
+
+Architecture support is a separate axis: x86_64 and aarch64, both musl.
+
 ### What is implemented, and why that is different
 
 oxinit does implement two protocols that came from systemd:

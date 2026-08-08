@@ -26,14 +26,3 @@ pub fn reap_all() -> Vec<(Pid, WaitStatus)> {
         }
     }
 }
-
-/// How a child ended, for logging.
-pub fn describe(status: &WaitStatus) -> String {
-    if let Some(code) = status.exit_status() {
-        format!("exit status {code}")
-    } else if let Some(signal) = status.terminating_signal() {
-        format!("killed by signal {signal}")
-    } else {
-        "stopped or continued".to_owned()
-    }
-}

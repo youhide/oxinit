@@ -13,6 +13,7 @@ publish.workspace = true
 # which rustix does not cover, and is used only from `sys::raw`.
 libc.workspace = true
 oxinit-graph = { path = "../oxinit-graph" }
+oxinit-service = { path = "../oxinit-service" }
 oxinit-unit = { path = "../oxinit-unit" }
-rustix = { workspace = true, features = ["fs", "mount", "process", "stdio", "system"] }
+rustix = { workspace = true, features = ["event", "fs", "mount", "net", "process", "stdio", "system", "time"] }
 thiserror.workspace = true
