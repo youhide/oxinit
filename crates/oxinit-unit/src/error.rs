@@ -34,6 +34,12 @@ pub enum UnitError {
 
     #[error("invalid unit name `{unit}`: expected only letters, digits, `_`, `.`, and `-`")]
     Name { unit: String },
+
+    #[error("read {path}: {message}")]
+    Read { path: String, message: String },
+
+    #[error("read directory {path}: {message}")]
+    Directory { path: String, message: String },
 }
 
 /// A malformed `exec` string.

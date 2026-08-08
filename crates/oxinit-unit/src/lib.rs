@@ -18,9 +18,11 @@
 
 pub mod error;
 pub mod exec;
+pub mod load;
 pub mod unit;
 pub mod value;
 
 pub use error::{ExecError, UnitError, ValueError};
+pub use load::{load_default, load_dirs, Loaded, ETC_DIR, VENDOR_DIR};
 pub use unit::{parse, Deps, Kind, Resources, Restart, Service, ServiceType, Unit};
 pub use value::{parse_duration, parse_size, DurationValue, SizeValue};

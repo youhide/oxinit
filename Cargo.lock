@@ -49,6 +49,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxinit-graph"
+version = "0.0.0"
+dependencies = [
+ "oxinit-unit",
+ "thiserror",
+]
+
+[[package]]
 name = "oxinit-unit"
 version = "0.0.0"
 dependencies = [
