@@ -1,0 +1,8 @@
+# Exits 0. With restart = "no" this must go inactive, not failed, and must
+# not be restarted.
+[unit]
+description = "Exits cleanly once"
+
+[service]
+type = "oneshot"
+exec = "/bin/true"

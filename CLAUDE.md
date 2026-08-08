@@ -16,6 +16,7 @@ crates/oxinit/         PID 1 binary
 crates/oxctl/          CLI client
 crates/oxinit-unit/    unit parsing + validation
 crates/oxinit-graph/   dependency resolution
+crates/oxinit-service/ service state machine and restart policy
 crates/oxinit-cgroup/  cgroup v2
 crates/oxinit-ipc/     control protocol types
 crates/xtask/          build and boot automation
@@ -23,8 +24,13 @@ docs/                  specifications
 tests/                 integration tests
 ```
 
-`oxinit-unit` and `oxinit-graph` must stay free of Linux-specific dependencies.
-They are tested on the host without a VM. Do not add a syscall to either.
+`oxinit-unit`, `oxinit-graph`, and `oxinit-service` must stay free of
+Linux-specific dependencies. They are tested on the host without a VM. Do not
+add a syscall to any of them.
+
+That split is why the state machine lives outside the `oxinit` crate: the
+binary is Linux-only and denies compilation elsewhere, so anything inside it is
+untestable on a macOS or BSD host. Policy logic goes in a library crate.
 
 ## Rules for the `oxinit` crate
 

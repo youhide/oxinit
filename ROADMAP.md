@@ -71,23 +71,32 @@ silently run as root.
 
 ## M2 — Supervision
 
-**Next.**
+**In progress.** The state machine and restart handling are done; readiness and
+the notify protocol are not.
 
-- [ ] Service state machine: `Inactive`, `Activating`, `Active`,
+- [x] Service state machine: `Inactive`, `Activating`, `Active`,
       `Deactivating`, `Failed`, `Restarting`.
-- [ ] Restart policies: `no`, `always`, `on-failure`, `on-abnormal`.
-- [ ] Exponential backoff from `restart-sec`, capped, with reset after a
+- [x] Restart policies: `no`, `always`, `on-failure`, `on-abnormal`.
+- [x] Exponential backoff from `restart-sec`, capped, with reset after a
       sustained `Active` period.
-- [ ] One timerfd plus a `BinaryHeap` of deadlines for backoff and timeouts.
+- [x] One timerfd plus a `BinaryHeap` of deadlines for backoff and timeouts.
+- [x] epoll: signalfd and timerfd multiplexed, level-triggered.
 - [ ] Readiness by `type`: `simple`, `oneshot`, `notify`.
 - [ ] `sd_notify` on a `SOCK_DGRAM` socket at `/run/oxinit/notify`:
       `READY=1`, `STATUS=`, `WATCHDOG=1`.
 - [ ] `SO_PASSCRED` on the notify socket; sender identity from the
       `SCM_CREDENTIALS` ancillary message, not from the payload.
 - [ ] Watchdog deadlines and the miss path into `Failed`.
+- [ ] Apply `user`: setgid, initgroups, setuid between fork and exec. Until
+      this lands a non-root `user` is refused rather than run as root.
 
 `type = "forking"` is deferred to M3, since it depends on cgroup emptiness
-notification.
+notification. Until readiness lands, `notify` and `forking` are treated as
+`simple`.
+
+Restart handling is verified under QEMU: a service exiting non-zero under
+`restart = "on-failure"` with `restart-sec = "200ms"` comes back after 200ms,
+400ms, 800ms, 1.6s, 3.2s, 6.4s — doubling per consecutive failure.
 
 ## M3 — cgroup v2
 

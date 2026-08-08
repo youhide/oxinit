@@ -45,6 +45,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oxinit-graph",
+ "oxinit-service",
  "oxinit-unit",
  "rustix",
  "thiserror",
@@ -56,6 +57,13 @@ version = "0.0.0"
 dependencies = [
  "oxinit-unit",
  "thiserror",
+]
+
+[[package]]
+name = "oxinit-service"
+version = "0.0.0"
+dependencies = [
+ "oxinit-unit",
 ]
 
 [[package]]

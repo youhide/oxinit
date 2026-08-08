@@ -405,6 +405,7 @@ oxinit/
 │  ├─ oxctl/             # CLI client
 │  ├─ oxinit-unit/       # unit parsing + validation
 │  ├─ oxinit-graph/      # dependency resolution
+│  ├─ oxinit-service/    # service state machine, restart policy
 │  ├─ oxinit-cgroup/     # cgroup v2
 │  ├─ oxinit-ipc/        # control protocol types
 │  └─ xtask/             # build and boot automation
@@ -412,9 +413,11 @@ oxinit/
 └─ tests/
 ```
 
-`oxinit-unit` and `oxinit-graph` have no Linux dependencies and are testable on
-any host. That is deliberate: the parser and the graph are where the logic
-errors are, and they should not require a VM to exercise.
+`oxinit-unit`, `oxinit-graph`, and `oxinit-service` have no Linux dependencies
+and are testable on any host. That is deliberate: the parser, the graph, and the
+restart policy are where the logic errors are, and they should not require a VM
+to exercise. The `oxinit` crate refuses to compile off Linux, so anything placed
+in it is unreachable from a host test suite.
 
 ## Development loop
 

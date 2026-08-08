@@ -174,7 +174,7 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
 /// not exist and the shell can only run its own builtins.
 const APPLETS: &[&str] = &[
     "cat", "ls", "ps", "sleep", "mount", "umount", "hostname", "grep", "poweroff", "reboot",
-    "dmesg", "kill", "mkdir", "echo",
+    "dmesg", "kill", "mkdir", "echo", "true", "false", "date",
 ];
 
 /// Whether to treat this binary as busybox, by filename.

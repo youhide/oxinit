@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/oxinit", "crates/oxinit-graph", "crates/oxinit-unit", "crates/xtask"]
+members = [
+    "crates/oxinit",
+    "crates/oxinit-graph",
+    "crates/oxinit-service",
+    "crates/oxinit-unit",
+    "crates/xtask",
+]
 
 [workspace.package]
 edition = "2021"

@@ -37,6 +37,12 @@ pub enum Error {
     #[error("set hostname: {0}")]
     Hostname(#[source] rustix::io::Errno),
 
+    #[error("epoll: {0}")]
+    Epoll(#[source] rustix::io::Errno),
+
+    #[error("timerfd: {0}")]
+    Timer(#[source] rustix::io::Errno),
+
     #[error("spawn {path}: {source}")]
     Spawn {
         path: &'static str,
