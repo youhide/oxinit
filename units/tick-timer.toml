@@ -1,0 +1,12 @@
+# First firing two seconds after this unit starts, then every three seconds
+# from the previous firing.
+#
+# The name is not `stamp`: unit names are unique across kinds, so a timer and
+# its service cannot share one. `service` says which unit to start.
+[unit]
+description = "Runs the stamp job on a schedule"
+
+[timer]
+service  = "stamp"
+on-boot  = "2s"
+interval = "3s"

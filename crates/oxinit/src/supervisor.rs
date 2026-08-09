@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::OFlags;
 use rustix::process::{Pid, Signal};
@@ -43,6 +43,10 @@ pub struct Supervisor {
     /// the policy has nothing to say about it. Something else has to remember
     /// that a start was asked for, and this is it.
     pending_restart: BTreeSet<String>,
+    /// When each armed timer unit next fires. Reported by `oxctl`, and kept
+    /// here rather than asked of the deadline heap, which is a `BinaryHeap`
+    /// and answers "the soonest" rather than "this one's".
+    next_elapse: BTreeMap<String, Instant>,
     /// Set once the machine is going down. Nothing starts after this, and
     /// every event is also a chance to notice that everything has stopped.
     shutdown: Option<Shutdown>,
@@ -77,6 +81,7 @@ impl Supervisor {
                 logs,
                 sockets: Sockets::new(),
                 pending_restart: BTreeSet::new(),
+                next_elapse: BTreeMap::new(),
                 shutdown: None,
                 hostname: hostname.to_owned(),
             };
@@ -106,6 +111,7 @@ impl Supervisor {
             logs,
             sockets: Sockets::new(),
             pending_restart: BTreeSet::new(),
+            next_elapse: BTreeMap::new(),
             shutdown: None,
             hostname: hostname.to_owned(),
         };
@@ -225,6 +231,18 @@ impl Supervisor {
             return;
         }
 
+        // Starting a timer unit means arming it. It runs no process, owns no
+        // cgroup, and the service it names is deliberately not started now —
+        // that is what a schedule is for.
+        if let Kind::Timer(timer) = &instance.unit.kind {
+            let schedule = timer.schedule.clone();
+            let service = timer.service.clone();
+            instance.entered_active();
+
+            self.arm(name, &service, schedule.first(unix_now()));
+            return;
+        }
+
         // A socket unit's descriptors were bound before anything started, so
         // reaching it in the order is only the announcement. Units ordered
         // after it can rely on the addresses being bound, which is the point
@@ -323,6 +341,79 @@ impl Supervisor {
                 eprintln!("oxinit: {name}: {e}");
             }
         }
+    }
+
+    /// Schedule a timer unit's next firing.
+    ///
+    /// `None` means there is no next one — an `on-boot` with no `interval` and
+    /// no calendar is a delayed one-shot, and the unit stays `Active` with
+    /// nothing pending rather than re-arming into a loop nobody asked for.
+    fn arm(&mut self, name: &str, service: &str, delay: Option<Duration>) {
+        let Some(delay) = delay else {
+            println!("oxinit: {name} has fired; nothing further scheduled");
+            self.next_elapse.remove(name);
+            return;
+        };
+
+        let alarm = Alarm::TimerElapsed {
+            unit: name.to_owned(),
+        };
+
+        match self.timers.schedule(delay, alarm) {
+            Ok(()) => {
+                self.next_elapse
+                    .insert(name.to_owned(), Instant::now() + delay);
+                println!("oxinit: {name} will start {service} in {delay:?}");
+            }
+            Err(e) => eprintln!("oxinit: {name}: {e}"),
+        }
+    }
+
+    /// A timer elapsed: start what it names, then arm it again.
+    ///
+    /// Re-armed before the service is started rather than after, so a service
+    /// that fails to start does not also stop the schedule. A timer is a
+    /// statement about when, not about whether the last run worked.
+    fn timer_elapsed(&mut self, name: &str) {
+        let Some(timer) = self
+            .instances
+            .get(name)
+            .and_then(|instance| instance.unit.timer())
+        else {
+            return;
+        };
+
+        let service = timer.service.clone();
+        let schedule = timer.schedule.clone();
+
+        // Not re-armed once the machine is going down. The firing itself would
+        // be refused by `start`, so this is only about not announcing a
+        // schedule that will never be kept.
+        if !self.shutting_down() {
+            self.arm(name, &service, schedule.next(unix_now()));
+        }
+
+        if !self.instances.contains_key(&service) {
+            eprintln!("oxinit: {name}: no unit named `{service}` to start");
+            return;
+        }
+
+        // Already running: skipped rather than queued. A job that takes longer
+        // than its own interval would otherwise accumulate copies of itself
+        // until the machine fell over, and the next firing is one interval
+        // away either way.
+        let busy = self
+            .instances
+            .get(&service)
+            .is_some_and(|instance| !is_idle(instance.state));
+
+        if busy {
+            eprintln!("oxinit: {name}: {service} is still running; skipping this firing");
+            return;
+        }
+
+        println!("oxinit: {name} elapsed; starting {service}");
+        self.start(&service);
     }
 
     /// The descriptor a unit's `stdout` and `stderr` should land on, if not
@@ -912,6 +1003,7 @@ impl Supervisor {
                 Kind::Service(_) => "service",
                 Kind::Target => "target",
                 Kind::Socket(_) => "socket",
+                Kind::Timer(_) => "timer",
             }
             .to_owned(),
             description: instance.unit.description.clone(),
@@ -921,6 +1013,12 @@ impl Supervisor {
             status: instance.status.clone(),
             memory: stats.memory,
             tasks: stats.tasks,
+            next_elapse: self.next_elapse.get(instance.name()).map(|at| {
+                // Rounded up. A timer that has not fired yet must never report
+                // "in 0s", which reads as broken rather than as imminent.
+                let left = at.saturating_duration_since(Instant::now());
+                left.as_secs() + u64::from(left.subsec_nanos() > 0)
+            }),
         }
     }
 
@@ -936,6 +1034,7 @@ impl Supervisor {
                 Kind::Service(_) => "service",
                 Kind::Target => "target",
                 Kind::Socket(_) => "socket",
+                Kind::Timer(_) => "timer",
             };
 
             print!("  {name} ({kind}): {}", instance.state);
@@ -997,6 +1096,7 @@ impl Supervisor {
                 }
                 Alarm::WatchdogCheck { unit } => self.check_watchdog(&unit),
                 Alarm::StopTimeout { unit } => self.stop_timed_out(&unit),
+                Alarm::TimerElapsed { unit } => self.timer_elapsed(&unit),
             }
         }
     }
@@ -1178,6 +1278,18 @@ fn spawn(
     );
 
     command.spawn().map_err(|e| format!("spawn {program}: {e}"))
+}
+
+/// The wall clock, in seconds, for a calendar schedule.
+///
+/// Only calendar schedules consult it. Everything else is measured from an
+/// event on the monotonic clock, which is what stops an NTP correction moving
+/// a restart backoff or a stop timeout.
+fn unix_now() -> oxinit_timer::Unix {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Copy the listening descriptors somewhere the child can move them from.

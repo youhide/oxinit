@@ -11,6 +11,7 @@ publish.workspace = true
 # No Linux dependencies. This crate is where the parser bugs are, and it must
 # be testable on any host without a VM.
 [dependencies]
+oxinit-timer = { path = "../oxinit-timer" }
 basic-toml.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true

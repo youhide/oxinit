@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use oxinit_timer::{Calendar, Schedule};
 use serde::Deserialize;
 
 use crate::error::UnitError;
@@ -43,6 +44,9 @@ pub enum Kind {
     /// Listening descriptors, and the service they belong to. Runs no process
     /// and owns no cgroup either; the service it activates does both.
     Socket(Socket),
+    /// A schedule, and the service it starts. Runs no process and owns no
+    /// cgroup; being armed is the whole of what it does.
+    Timer(Timer),
 }
 
 /// Default `listen(2)` backlog.
@@ -57,6 +61,19 @@ pub struct Socket {
     pub service: String,
     pub ty: SocketType,
     pub backlog: u32,
+}
+
+/// When to start something, and what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Timer {
+    pub schedule: Schedule,
+    /// The service to start when it elapses.
+    ///
+    /// Required rather than inferred from the timer's own name, for the reason
+    /// a socket unit's is: unit names are unique across kinds, which is what
+    /// lets `requires`, `after` and `oxctl` take a bare name — so a timer and
+    /// its service cannot share one.
+    pub service: String,
 }
 
 /// One address to bind.
@@ -162,8 +179,16 @@ impl Unit {
             Kind::Service(_) => "service",
             Kind::Target => "target",
             Kind::Socket(_) => "socket",
+            Kind::Timer(_) => "timer",
         };
         format!("{}.{}", self.name, suffix)
+    }
+
+    pub fn timer(&self) -> Option<&Timer> {
+        match &self.kind {
+            Kind::Timer(timer) => Some(timer),
+            _ => None,
+        }
     }
 
     pub fn service(&self) -> Option<&Service> {
@@ -191,6 +216,7 @@ struct RawFile {
     service: Option<RawService>,
     target: Option<RawTarget>,
     socket: Option<RawSocket>,
+    timer: Option<RawTimer>,
     resources: Option<RawResources>,
 }
 
@@ -242,6 +268,15 @@ struct RawSocket {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawTimer {
+    service: String,
+    on_boot: Option<DurationValue>,
+    interval: Option<DurationValue>,
+    on_calendar: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawResources {
     memory_max: Option<SizeValue>,
     tasks_max: Option<u64>,
@@ -279,7 +314,8 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
     // sections is eight cases, and seven of them are the same error.
     let sections = usize::from(raw.service.is_some())
         + usize::from(raw.target.is_some())
-        + usize::from(raw.socket.is_some());
+        + usize::from(raw.socket.is_some())
+        + usize::from(raw.timer.is_some());
 
     if sections == 0 {
         return Err(UnitError::NoKind {
@@ -300,8 +336,8 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
         });
     }
 
-    let kind = match (raw.service, raw.socket) {
-        (Some(service), None) => {
+    let kind = match (raw.service, raw.socket, raw.timer) {
+        (Some(service), None, None) => {
             let user = service.user.unwrap_or_else(|| "root".to_owned());
             let ty = service.ty.unwrap_or_default();
 
@@ -347,7 +383,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
             })
         }
 
-        (None, Some(socket)) => {
+        (None, Some(socket), None) => {
             let ty = socket.ty.unwrap_or_default();
 
             if socket.listen.is_empty() {
@@ -380,6 +416,39 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 service: socket.service,
                 ty,
                 backlog: socket.backlog.unwrap_or(DEFAULT_BACKLOG),
+            })
+        }
+
+        (None, None, Some(timer)) => {
+            let calendar = timer
+                .on_calendar
+                .as_deref()
+                .map(Calendar::parse)
+                .transpose()
+                .map_err(|source| UnitError::Calendar {
+                    unit: name.to_owned(),
+                    source,
+                })?;
+
+            let schedule = Schedule {
+                on_boot: timer.on_boot.map(|value| value.0),
+                interval: timer.interval.map(|value| value.0),
+                calendar,
+            };
+
+            // A timer with nothing to fire on is a unit that would sit armed
+            // forever. Refused at load, where it can be reported against the
+            // file that says it, rather than at boot where it looks like a
+            // service that never ran.
+            if schedule.is_empty() {
+                return Err(UnitError::EmptySchedule {
+                    unit: name.to_owned(),
+                });
+            }
+
+            Kind::Timer(Timer {
+                schedule,
+                service: timer.service,
             })
         }
 
@@ -479,6 +548,59 @@ tasks-max  = 512
             Some(SizeValue::Bytes(256 * 1024 * 1024))
         );
         assert_eq!(service.resources.tasks_max, Some(512));
+    }
+
+    #[test]
+    fn parses_a_timer() {
+        let unit = parse_ok(
+            "nightly",
+            "[timer]\nservice = \"backup\"\non-boot = \"30s\"\ninterval = \"1h\"\non-calendar = \"03:30\"\n",
+        );
+
+        assert_eq!(unit.full_name(), "nightly.timer");
+
+        let timer = unit.timer().unwrap();
+        assert_eq!(timer.service, "backup");
+        assert_eq!(timer.schedule.on_boot, Some(Duration::from_secs(30)));
+        assert_eq!(timer.schedule.interval, Some(Duration::from_secs(3600)));
+        assert_eq!(
+            timer.schedule.calendar,
+            Some(oxinit_timer::Calendar::At {
+                hour: 3,
+                minute: 30,
+                second: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_timer_needs_something_to_fire_on() {
+        // Otherwise it is a unit that sits armed forever, and looks from the
+        // outside like a service that never ran.
+        assert!(parse("t", "[timer]\nservice = \"backup\"\n", "h").is_err());
+    }
+
+    #[test]
+    fn a_timer_rejects_a_schedule_it_cannot_read() {
+        assert!(parse(
+            "t",
+            "[timer]\nservice = \"b\"\non-calendar = \"*/5\"\n",
+            "h"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_unit_is_one_kind() {
+        assert!(
+            parse(
+                "t",
+                "[timer]\nservice = \"b\"\ninterval = \"1h\"\n[target]\n",
+                "h"
+            )
+            .is_err(),
+            "a timer and a target in one file is not a unit"
+        );
     }
 
     #[test]

@@ -441,8 +441,8 @@ compatibility matters:
 Units are TOML files. The full key specification is in
 [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md).
 
-A unit is a service, a target, or a socket, determined by which section it
-carries. Targets run no process; they exist to be depended on, so that a
+A unit is a service, a target, a socket, or a timer, determined by which
+section it carries. Targets run no process; they exist to be depended on, so that a
 dependency on one pulls in a set of units. Socket units run no process either;
 they own listening descriptors and name the service those belong to. The unit
 named `default` is what boot starts.
@@ -758,6 +758,52 @@ registration calls, and there is neither here. It is also not PID 1, so the
 rules in [Concurrency](#concurrency) are guidance rather than law; it happens
 to follow them because the same reasoning applies.
 
+## Timers
+
+A `[timer]` unit starts a service on a schedule. It runs no process and owns
+no cgroup; being armed is the whole of what it does, which is why it costs an
+entry in the deadline heap and nothing else.
+
+**No new machinery.** M2 built one timerfd and a `BinaryHeap<Deadline>`
+because restart backoff, start timeouts and watchdog intervals are all "wake
+me in N". A schedule is the same statement, so a timer unit is one more
+`Alarm` variant and not a second clock.
+
+**Three keys, not systemd's five.** `on-boot` is the first firing, measured
+from when the timer unit started; `interval` is every firing after it,
+measured from the previous firing; `on-calendar` is wall-clock. Where more
+than one applies, the soonest wins — the only reading of "and" that does not
+silently ignore one of them.
+
+Measuring `interval` from the previous *firing* rather than from the service's
+last activation is the deliberate difference. It is what the key name says, it
+does not depend on a transition the service may never make — a `oneshot`
+service never reaches `Active` at all — and it is what anyone writing "every
+hour" means.
+
+**The calendar vocabulary is closed**: `hourly`, `daily`, `weekly`, and a
+literal `HH:MM` or `HH:MM:SS`. Times are UTC; oxinit has no timezone database
+and is not going to carry one. This is not a cron expression and will not grow
+into one, for the reason the `%` specifier set is closed — it is not an escape
+hatch for a language.
+
+**A firing while the service is still running is skipped, not queued.** A job
+that outlasts its own interval would otherwise accumulate copies of itself,
+and the firing after it is one interval away either way. **A failed run does
+not stop the schedule**: the timer is re-armed before the service is started,
+because a timer says *when*, and what to do about a failure is the service's
+`restart`.
+
+**Known limitation.** A calendar deadline is computed once, as a delay on the
+monotonic clock, so a clock step between arming and firing moves that firing.
+Every firing after it is recomputed against the corrected clock. The proper
+fix is a second timerfd on `CLOCK_REALTIME` with `TFD_TIMER_CANCEL_ON_SET`,
+which is a second clock in the heap and has not been earned yet.
+
+`oxinit-timer` holds the schedule types and the arithmetic, takes the current
+time as an argument, and makes no syscall — so "what does this do at 23:59:59"
+is a host test rather than something you find out in production.
+
 ## IPC
 
 `oxctl` connects to `/run/oxinit/control.sock` and exchanges request/response
@@ -810,6 +856,7 @@ oxinit/
 │  ├─ oxinit-user/       # /etc/passwd and /etc/group
 │  ├─ oxinit-ipc/        # control protocol types
 │  ├─ oxinit-log/        # record format, rotation policy, paths
+│  ├─ oxinit-timer/      # schedules and calendar arithmetic
 │  ├─ notify-probe/      # test fixture: a service that speaks sd_notify
 │  ├─ listen-probe/      # test fixture: a socket-activated service
 │  └─ xtask/             # build and boot automation
@@ -835,6 +882,9 @@ tested without a kernel should not be in it.
 - `oxinit-user` is text parsing. Getting a uid wrong is a privilege bug, so the
   parsing is separated from the `setuid` that consumes it and tested on its
   own.
+- `oxinit-timer` takes the current time as an argument and returns a delay.
+  Nothing about "when does this next fire" needs a clock to test, and getting
+  it wrong means a job that runs twice, at the wrong hour, or never.
 - `oxinit-log` is where a log line is decided to be a log line: splitting a
   read into records, bounding one that never ends, and choosing when to rotate.
   All three programs agree on it because all three depend on it, and none of it
