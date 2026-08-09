@@ -94,6 +94,7 @@ type        = "notify"          # simple | forking | oneshot | notify
 exec        = "/usr/sbin/sshd -D"
 restart     = "on-failure"      # no | always | on-failure | on-abnormal
 restart-sec = "5s"
+stop-sec    = "20s"
 user        = "root"
 
 [resources]
@@ -295,6 +296,23 @@ restart doubles the delay, capped at 5 minutes. The backoff resets once the
 service has been `Active` for longer than the current delay — without that, a
 service that fails once a week eventually takes hours to come back.
 
+### `stop-sec`
+
+- **Type:** duration string
+- **Required:** no
+- **Default:** `"30s"`
+
+How long the service has to stop after being sent `SIGTERM`, before oxinit
+writes `cgroup.kill` and the kernel kills everything in its cgroup at once.
+
+The unit is `Deactivating` for this window. It leaves it when the cgroup
+empties — not when the main process exits, because a service that forked
+children is not stopped until they are gone too.
+
+A unit that had to be killed this way ends in `Failed` rather than `Inactive`,
+even when the stop was requested. It did not stop when it was asked to, and
+that is worth reporting.
+
 ### `watchdog-sec`
 
 - **Type:** duration string
@@ -318,12 +336,18 @@ Setting it on another type is a load error.
 - **Required:** no
 - **Default:** `"root"`
 
-Username to run the service as. Resolved to a uid and gid against `/etc/passwd`
-at start time, not at load time, so a unit may reference a user created later in
-the boot.
+Username to run the service as. Resolved to a uid and gid against `/etc/passwd`,
+and to a supplementary group set against `/etc/group`, at start time rather than
+at load time — so a unit may reference a user that an earlier service in the
+boot creates.
 
-`setgid` and `initgroups` are called before `setuid`. Reversing that order would
-drop the privilege needed to change groups.
+`setgroups` and `setgid` are called before `setuid`. Reversing that order would
+drop the privilege needed to change groups, and would do it silently: the
+process keeps the groups it was supposed to shed.
+
+The supplementary set includes the primary group, as `initgroups` does. Dropping
+it would quietly give the service less than a login shell for the same account
+has.
 
 An unresolvable username at start time fails the unit.
 
