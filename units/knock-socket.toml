@@ -1,0 +1,13 @@
+# A datagram socket. Never listen()ed on, never accepted: oxinit watches it and
+# starts the service when it becomes *readable*, and the datagram that woke it
+# is still queued for the service to read.
+#
+# `backlog` is refused alongside this type rather than ignored, which the
+# parser has always done and no boot had ever exercised.
+[unit]
+description = "Knock socket, datagram"
+
+[socket]
+listen  = ["/run/knock.sock"]
+service = "knock"
+type    = "datagram"

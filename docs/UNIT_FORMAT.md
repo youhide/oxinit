@@ -3,8 +3,9 @@
 Units are TOML files. This document specifies every key: its type, whether it is
 required, its default, and what happens when it is absent.
 
-Nothing here is implemented yet. This is the specification the parser in
-`oxinit-unit` is written against.
+This is the specification the parser in `oxinit-unit` is written against, not a
+description of it. Changing the format means changing this document in the same
+commit.
 
 ## File naming and location
 
@@ -17,7 +18,7 @@ rejected at load time.
 
 ### Unit kinds
 
-A unit is one of three kinds, determined by which section it carries. Exactly
+A unit is one of four kinds, determined by which section it carries. Exactly
 one of these must be present:
 
 | Section     | Kind    | Status                                              |
@@ -31,8 +32,8 @@ Names are unique across kinds: there cannot be both a `sshd` service and a
 `sshd` target. That is what lets `requires`, `after`, and `oxctl` take a bare
 name with no suffix and no ambiguity.
 
-This is why a socket unit names its service explicitly rather than sharing a
-name with it. `sshd-socket` activating `sshd` is two units with two names; the
+This is why a socket unit — and a timer unit — names its service explicitly
+rather than sharing a name with it. `sshd-socket` activating `sshd` is two units with two names; the
 alternative would mean `requires = ["sshd"]` no longer identifies one unit.
 
 A unit's **fully-qualified name** is `<name>.<kind>` — `sshd.service`,
@@ -685,12 +686,14 @@ teaches an operator a syntax this document does not describe.
 **Times are UTC.** oxinit has no timezone database and is not going to carry
 one.
 
-**A clock step moves a pending firing.** A calendar deadline is computed once,
-as a delay on the monotonic clock, so an NTP correction between arming and
-firing moves that firing by however much the clock moved. Every firing after
-it is recomputed against the corrected clock. Fixing this properly needs a
-`CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`; see
-[ROADMAP.md](../ROADMAP.md).
+**A clock step does not move a pending firing.** A calendar deadline is armed
+absolutely, on a `CLOCK_REALTIME` timerfd, so "at 03:30" stays at 03:30
+however the clock gets there — including across an NTP correction that jumps
+over it, which fires it immediately, and one that jumps back before it, which
+does not.
+
+That is a property of arming absolutely rather than of noticing the step.
+oxinit does notice, and logs it, and that is all the noticing is for.
 
 ## File descriptor passing
 

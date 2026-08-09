@@ -318,7 +318,9 @@ there is no framing layer, no length prefix, and no partial-message state to get
 wrong. `SOCK_STREAM` would require all three; `SOCK_DGRAM` would drop the
 connection semantics needed to reply.
 
-**Timerfd** — exactly one, paired with a `BinaryHeap<Deadline>`. Restart
+**Timerfd** — one per clock, each paired with a `BinaryHeap<Deadline>`. The
+monotonic one carries every relative deadline; the realtime one carries
+absolute calendar moments. See [Timers](#timers). Restart
 backoff, start timeouts, and watchdog intervals all become entries in the heap.
 The timerfd is armed for the earliest deadline. When it fires, every expired
 entry is popped and dispatched, then it is rearmed. One fd per timer would mean
@@ -827,11 +829,21 @@ not stop the schedule**: the timer is re-armed before the service is started,
 because a timer says *when*, and what to do about a failure is the service's
 `restart`.
 
-**Known limitation.** A calendar deadline is computed once, as a delay on the
-monotonic clock, so a clock step between arming and firing moves that firing.
-Every firing after it is recomputed against the corrected clock. The proper
-fix is a second timerfd on `CLOCK_REALTIME` with `TFD_TIMER_CANCEL_ON_SET`,
-which is a second clock in the heap and has not been earned yet.
+**Two clocks.** A backoff, a stop timeout and a start timeout are all "this
+long from now" and must not move when the clock is corrected: `CLOCK_MONOTONIC`,
+relative. A calendar schedule is "at 03:30" and must stay at 03:30 however the
+clock gets there: `CLOCK_REALTIME`, and **absolute**. Two timerfds, a heap
+each, both in the same epoll loop.
+
+Collapsing the second into the first — computing a delay once and arming a
+monotonic timer with it — is what made an NTP correction move a nightly job.
+The fix is to stop converting, not to recompute on a step: an absolute
+deadline needs no recomputation, because the kernel compares it against the
+same clock that changed. `TFD_TIMER_CANCEL_ON_SET` only makes the step
+visible; it is not what makes the deadline right.
+
+`Schedule` returns which clock it means — `Next::After(Duration)` or
+`Next::At(Unix)` — rather than a delay that has already lost the distinction.
 
 `oxinit-timer` holds the schedule types and the arithmetic, takes the current
 time as an argument, and makes no syscall — so "what does this do at 23:59:59"

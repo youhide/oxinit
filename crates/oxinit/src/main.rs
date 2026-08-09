@@ -194,6 +194,7 @@ fn boot() -> ! {
     let registered = events
         .register(&signals, event::Source::Signals)
         .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer))
+        .and_then(|()| events.register(supervisor.timers.wall_fd(), event::Source::WallTimer))
         .and_then(|()| events.register(supervisor.notify.as_fd(), event::Source::Notify));
 
     if let Some(control) = control.as_ref() {
@@ -306,6 +307,7 @@ fn run(
             let result = catch_unwind(AssertUnwindSafe(|| match source {
                 event::Source::Signals => on_signals(signals, supervisor, shell, &mut pending),
                 event::Source::Timer => supervisor.on_timer(),
+                event::Source::WallTimer => supervisor.on_wall_timer(),
                 event::Source::Notify => supervisor.on_notify(),
                 event::Source::Cgroup(id) => supervisor.on_cgroup(*id),
                 event::Source::Socket(id) => supervisor.on_socket(*id),

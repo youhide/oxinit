@@ -248,6 +248,14 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("got \"echo: hello\"", "M4: an activated service answered"),
     (
+        "listening for knock-socket on /run/knock.sock",
+        "M14: a datagram socket binds",
+    ),
+    (
+        "datagram on `knock-socket`, got \"knock\"",
+        "M14: and a datagram activates the service, which reads what woke it",
+    ),
+    (
         "oxinit: logs: shipper connected",
         "M7: oxlogd took the log socket",
     ),
@@ -266,6 +274,10 @@ const EXPECTED: &[(&str, &str)] = &[
     (
         "oxinit: tick-timer will start stamp in 2s",
         "M8: a timer arms with on-boot",
+    ),
+    (
+        "oxinit: nightly will start stamp at ",
+        "M14: a calendar schedule arms at a wall-clock moment, not in a delay",
     ),
     (
         "oxinit: tick-timer elapsed; starting stamp",

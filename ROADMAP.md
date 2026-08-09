@@ -792,21 +792,76 @@ watching it.
 Verified on both architectures, in the container, and against the real Alpine
 userspace: 38 checks per boot, 40 against the distribution image.
 
-Deferred out of M13: the backoff *reset* after a sustained `Active` period,
-which M2 also claims. Distinguishing "reset" from "never incremented" needs an
-assertion about a counter's history, and substring matching over a log cannot
-make one. It needs a different kind of test than this suite is.
+Deferred out of M13: nothing. This entry originally said the backoff *reset*
+was uncovered and needed "a different kind of test than this suite is". That
+was wrong, and M14 found it: `oxinit-service` has had
+`backoff_resets_after_the_service_stays_up` and
+`a_brief_active_period_does_not_reset_backoff` all along, in exactly the right
+place. The reset is policy logic in a crate with no OS dependency, and a host
+test is what it should be tested by — the boot suite was never the thing
+missing.
 
-## Beyond M13
+## M14 — The loose ends
 
-Not planned, not designed, listed only so the questions have an answer:
+**Done.**
 
-- Coverage for `type = "datagram"` and `type = "seqpacket"` sockets, which
-  needs a fixture that speaks them; `listen-probe` only does streams.
-- A `CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`, so a calendar
-  schedule survives the clock being stepped under it. Until then a wall-clock
-  firing is computed as a monotonic delay and an NTP correction moves it by
-  however much the clock moved.
-- Local time, which means a timezone database.
-- Replacing JSON with `postcard` on the control socket.
+Everything left on the list, and an honest account of the two things that are
+staying off it.
+
+- [x] Calendar schedules on a `CLOCK_REALTIME` timerfd, armed absolutely.
+- [x] `type = "datagram"` sockets, activated and asserted.
+- [x] The M13 note about the backoff reset, which was wrong.
+
+**Two clocks, because two kinds of deadline mean different things.** A backoff,
+a stop timeout and a start timeout are all "this long from now" and must not
+move when the clock is corrected — monotonic, relative. A calendar schedule is
+"at 03:30" and must stay at 03:30 however the clock gets there — realtime,
+*absolute*.
+
+M8 collapsed the second into the first: it computed "in fourteen hours" once
+and armed a monotonic timer with it, so an NTP correction moved a nightly job
+by however much the clock moved. The fix is not to recompute on a clock step —
+it is to stop converting. An absolute realtime deadline needs no
+recomputation, because the kernel compares it against the same clock that
+changed.
+
+`TFD_TIMER_CANCEL_ON_SET` is set as well and is *not* what makes that true. It
+only makes the step visible: the read fails with `ECANCELED` once, worth a line
+in the log and nothing else. Saying so matters, because the roadmap entry that
+asked for this named the flag as though the flag were the fix.
+
+`Schedule` now returns which clock it means — `Next::After(Duration)` or
+`Next::At(Unix)` — rather than a delay that has already lost the distinction.
+That is the whole of the type change, and it is what makes the routing
+impossible to get wrong.
+
+**A datagram socket is a different shape.** It is never `listen`ed on and never
+accepted, so oxinit starts the service on a *readable* descriptor rather than a
+pending connection, and the datagram that woke it is still queued for the
+service to read. `listen-probe` grew `--recv` and `--send` for it; the stream
+path could not have exercised any of that.
+
+`type = "seqpacket"` is still uncovered, and deliberately: it is `accept`ed
+like a stream, so it exercises the same oxinit path the `stream` units already
+do. A fixture for it would test the fixture.
+
+Verified: 41 checks per architecture, 43 against the distribution image, 148
+host tests.
+
+## Not doing, and why
+
+These were on the list. They are coming off it with a reason rather than
+sitting there forever.
+
+**`postcard` instead of JSON on the control socket.** ARCHITECTURE sets the
+precondition itself — "the likely replacement *once the message set stops
+changing*" — and it has not. `UnitStatus` gained a field in M8 and another in
+M14. JSON's stated benefit, that a message is readable with `socat` while the
+protocol is still moving, is worth more than bytes on a socket carrying a few
+messages a minute. The crate boundary is placed so this stays a one-file change
+whenever it is worth making.
+
+**Local time.** It means carrying a timezone database, which contradicts a
+position the project has already taken in writing, twice. Calendar schedules
+are UTC and say so. Reopening that is a decision, not a loose end.
 - A test suite that boots a real distribution userspace rather than a shell.

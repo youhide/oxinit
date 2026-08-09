@@ -1,0 +1,8 @@
+# Started by a datagram, not by boot.
+[unit]
+description = "Datagram-activated service"
+
+[service]
+type    = "oneshot"
+exec    = "/bin/listen-probe --recv knock-socket"
+restart = "no"

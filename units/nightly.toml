@@ -1,0 +1,11 @@
+# A calendar schedule, so a boot exercises the wall-clock path.
+#
+# It will not fire inside a test image's uptime, and that is the point: what
+# is asserted is that oxinit armed it *at* a moment rather than *in* a delay.
+# A monotonic delay computed once is what an NTP correction used to move.
+[unit]
+description = "Hourly, on the hour"
+
+[timer]
+service     = "stamp"
+on-calendar = "hourly"

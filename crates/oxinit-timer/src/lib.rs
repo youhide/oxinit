@@ -199,6 +199,36 @@ pub struct Schedule {
     pub calendar: Option<Calendar>,
 }
 
+/// When to fire, and *which clock says so*.
+///
+/// The distinction is the whole of what a clock step does to a schedule. A
+/// monotonic delay means "this long from now" and must not move when the clock
+/// is corrected; an absolute wall-clock moment means "at 03:30" and must stay
+/// at 03:30 however the clock gets there. Collapsing the second into the first
+/// — computing a delay once and arming a monotonic timer with it — is what
+/// made an NTP correction move a nightly job by however much the clock moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// A delay on the monotonic clock.
+    After(Duration),
+    /// A moment on the wall clock, in seconds since the epoch.
+    At(Unix),
+}
+
+impl Next {
+    /// Roughly how far away this is, for a countdown. `now` is the wall clock.
+    ///
+    /// Approximate for the calendar half by exactly the amount the clock is
+    /// about to be corrected by, which is the honest answer to "how long until
+    /// 03:30" when nobody knows what time it really is.
+    pub fn in_seconds(self, now: Unix) -> u64 {
+        match self {
+            Next::After(delay) => delay.as_secs(),
+            Next::At(at) => at.saturating_sub(now),
+        }
+    }
+}
+
 impl Schedule {
     /// Nothing to fire on. A load-time error, not a timer that sits forever.
     pub fn is_empty(&self) -> bool {
@@ -210,9 +240,8 @@ impl Schedule {
     /// `interval` with no `on-boot` means the first firing is one interval
     /// away, which is what "every ten minutes" means to the person who wrote
     /// it.
-    pub fn first(&self, now: Unix) -> Option<Duration> {
-        let monotonic = self.on_boot.or(self.interval);
-        Self::sooner(monotonic, self.calendar_delay(now))
+    pub fn first(&self, now: Unix) -> Option<Next> {
+        Self::sooner(self.on_boot.or(self.interval), self.calendar_at(now), now)
     }
 
     /// The delay to arm with after a firing.
@@ -225,26 +254,37 @@ impl Schedule {
     /// `None` when the timer is done: an `on-boot` with no `interval` and no
     /// calendar is a one-shot delayed task, and re-arming it would turn a
     /// deliberate single firing into a loop.
-    pub fn next(&self, now: Unix) -> Option<Duration> {
-        Self::sooner(self.interval, self.calendar_delay(now))
+    pub fn next(&self, now: Unix) -> Option<Next> {
+        Self::sooner(self.interval, self.calendar_at(now), now)
     }
 
-    /// Seconds from `now` to the next calendar occurrence.
+    /// The next wall-clock moment this schedule names.
     ///
     /// `now + 1` because [`Calendar::next_at`] answers "at or after", and
     /// asking at the exact second a schedule names would otherwise return that
     /// same second and fire again immediately.
-    fn calendar_delay(&self, now: Unix) -> Option<Duration> {
-        let calendar = self.calendar?;
-        let at = calendar.next_at(now.saturating_add(1));
-
-        Some(Duration::from_secs(at.saturating_sub(now)))
+    fn calendar_at(&self, now: Unix) -> Option<Unix> {
+        Some(self.calendar?.next_at(now.saturating_add(1)))
     }
 
-    fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (some, None) | (None, some) => some,
+    /// Whichever comes first, keeping the clock it belongs to.
+    ///
+    /// Compared in wall-clock seconds because that is the only scale both are
+    /// expressible on. Sub-second precision is lost in the comparison and not
+    /// in the result: a monotonic delay that wins is returned as the delay it
+    /// was, not as a rounded moment.
+    fn sooner(delay: Option<Duration>, at: Option<Unix>, now: Unix) -> Option<Next> {
+        match (delay, at) {
+            (Some(delay), Some(at)) => {
+                if now.saturating_add(delay.as_secs()) <= at {
+                    Some(Next::After(delay))
+                } else {
+                    Some(Next::At(at))
+                }
+            }
+            (Some(delay), None) => Some(Next::After(delay)),
+            (None, Some(at)) => Some(Next::At(at)),
+            (None, None) => None,
         }
     }
 }
@@ -262,6 +302,10 @@ mod tests {
 
     fn secs(n: u64) -> Option<Duration> {
         Some(Duration::from_secs(n))
+    }
+
+    fn after(n: u64) -> Option<Next> {
+        Some(Next::After(Duration::from_secs(n)))
     }
 
     #[test]
@@ -378,7 +422,7 @@ mod tests {
             ..Schedule::default()
         };
 
-        assert_eq!(schedule.next(midnight), secs(DAY));
+        assert_eq!(schedule.next(midnight), Some(Next::At(midnight + DAY)));
     }
 
     #[test]
@@ -388,8 +432,8 @@ mod tests {
             ..Schedule::default()
         };
 
-        assert_eq!(schedule.first(NOW), secs(600));
-        assert_eq!(schedule.next(NOW), secs(600));
+        assert_eq!(schedule.first(NOW), after(600));
+        assert_eq!(schedule.next(NOW), after(600));
     }
 
     #[test]
@@ -399,7 +443,7 @@ mod tests {
             ..Schedule::default()
         };
 
-        assert_eq!(schedule.first(NOW), secs(30));
+        assert_eq!(schedule.first(NOW), after(30));
         assert_eq!(
             schedule.next(NOW),
             None,
@@ -415,8 +459,8 @@ mod tests {
             ..Schedule::default()
         };
 
-        assert_eq!(schedule.first(NOW), secs(5));
-        assert_eq!(schedule.next(NOW), secs(3600));
+        assert_eq!(schedule.first(NOW), after(5));
+        assert_eq!(schedule.next(NOW), after(3600));
     }
 
     #[test]
@@ -431,8 +475,41 @@ mod tests {
 
         assert_eq!(
             schedule.next(NOW),
-            secs(25 * MINUTE + 4),
-            "the hour comes before the day"
+            Some(Next::At(NOW + 25 * MINUTE + 4)),
+            "the hour comes before the day, and stays on the wall clock"
+        );
+    }
+
+    #[test]
+    fn a_calendar_firing_keeps_the_wall_clock() {
+        // The bug this exists to prevent: collapsing "at 03:30" into "in
+        // fourteen hours" and arming a monotonic timer with it, so that an NTP
+        // correction moves the job by however much the clock moved.
+        let schedule = Schedule {
+            calendar: Some(Calendar::At {
+                hour: 3,
+                minute: 30,
+                second: 0,
+            }),
+            ..Schedule::default()
+        };
+
+        assert!(matches!(schedule.next(NOW), Some(Next::At(_))));
+    }
+
+    #[test]
+    fn a_monotonic_firing_keeps_its_sub_second_precision() {
+        // Comparison happens in whole seconds; the result must not be rounded
+        // to them.
+        let schedule = Schedule {
+            interval: Some(Duration::from_millis(1500)),
+            calendar: Some(Calendar::Daily),
+            ..Schedule::default()
+        };
+
+        assert_eq!(
+            schedule.next(NOW),
+            Some(Next::After(Duration::from_millis(1500)))
         );
     }
 
