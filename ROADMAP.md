@@ -752,10 +752,57 @@ surprise: an emulated ARM64 boot on an x86_64 runner costs nine seconds more
 than a native one. The 300-second budget picked in M9 turns out to be an order
 of magnitude of headroom rather than a tight fit.
 
-## Beyond M12
+## M13 — Covering what was already claimed
+
+**Done.**
+
+M12 made the suites continuous. This is about what they were continuously
+running, which turned out to be less than the milestones above claim.
+
+Seven behaviours had no coverage at all. Each is asserted by a milestone that
+says "Verified:", and each was — once, by hand, on the machine of whoever
+wrote it.
+
+| Claimed in | What nothing re-ran                                  |
+|------------|------------------------------------------------------|
+| M2         | The restart policy firing at all.                     |
+| M2         | The backoff doubling: 200ms, 400ms, 800ms.            |
+| M2         | `on-abnormal` treating a signal death as abnormal.    |
+| M2 / M3    | A watchdog miss taking the restart policy.            |
+| M1         | `%N` and `%u`, against a running machine.             |
+| M5         | `oxctl reload`.                                       |
+| M7         | `output = "null"` actually discarding.                |
+
+**`flaky.toml` is the whole story in one file.** It has existed since M2, its
+comment describes the doubling exactly, and it was never reachable from
+`default` — so nothing ever started it. A unit file that documents a test
+nobody runs is worse than no unit file, because it reads as coverage.
+
+The watchdog one is the most interesting. ARCHITECTURE argues at length that a
+watchdog miss must take the restart policy where an `oxctl stop` overrides it,
+and calls that asymmetry "the point of a watchdog". The only unit that missed a
+watchdog declared `restart = "no"`, so only the half that changes nothing had
+ever run.
+
+**Nothing was broken.** Every one of the seven worked the first time it was
+asked to. That is the honest result and it is worth saying plainly: this
+milestone bought guarding, not fixing. The code was right; nothing was
+watching it.
+
+Verified on both architectures, in the container, and against the real Alpine
+userspace: 38 checks per boot, 40 against the distribution image.
+
+Deferred out of M13: the backoff *reset* after a sustained `Active` period,
+which M2 also claims. Distinguishing "reset" from "never incremented" needs an
+assertion about a counter's history, and substring matching over a log cannot
+make one. It needs a different kind of test than this suite is.
+
+## Beyond M13
 
 Not planned, not designed, listed only so the questions have an answer:
 
+- Coverage for `type = "datagram"` and `type = "seqpacket"` sockets, which
+  needs a fixture that speaks them; `listen-probe` only does streams.
 - A `CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`, so a calendar
   schedule survives the clock being stepped under it. Until then a wall-clock
   firing is computed as a monotonic delay and an NTP correction moves it by

@@ -289,6 +289,39 @@ const EXPECTED: &[(&str, &str)] = &[
         "M8: and re-arms with interval, so it fires again",
     ),
     (
+        "flaky exited with status 1, restarting in 200ms (restart 1)",
+        "M13: the restart policy fires, from the first failure",
+    ),
+    (
+        "restarting in 400ms (restart 2)",
+        "M13: and the backoff doubles",
+    ),
+    (
+        "restarting in 800ms (restart 3)",
+        "M13: and keeps doubling, which nothing had ever run",
+    ),
+    (
+        "signalled terminated abnormally, restarting in",
+        "M13: on-abnormal sees a signal death as abnormal",
+    ),
+    (
+        "oxinit: started signalled as pid",
+        "M13: and restarts for it",
+    ),
+    (
+        "hangs-back missed its watchdog deadline",
+        "M13: a watchdog miss",
+    ),
+    (
+        "hangs-back stopped, restarting in",
+        "M13: takes the restart policy, unlike a requested stop",
+    ),
+    (
+        "oxinit-m13: specifiers.service runs as nobody",
+        "M13: %N and %u expand against a running machine",
+    ),
+    ("reloaded", "M5: oxctl reload, which no boot had ever run"),
+    (
         "oxinit: shutting down to power off",
         "M5: SIGTERM is handled",
     ),

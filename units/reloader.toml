@@ -1,0 +1,8 @@
+# `oxctl reload`, which M5 listed and no boot has ever run.
+[unit]
+description = "Re-reads the unit directories"
+after       = ["banner"]
+
+[service]
+type = "oneshot"
+exec = "/bin/oxctl reload"
