@@ -1,0 +1,15 @@
+# Writes to both streams and exits. Its output must end up in
+# /var/log/oxinit/chatty.log, timestamped, in the order it was written — and
+# must not appear on the console.
+#
+# `after` on oxlogd, which is `notify`, so this does not start until there is
+# something on the other end of the pipe.
+[unit]
+description = "Writes to stdout and stderr"
+after       = ["oxlogd"]
+requires    = ["oxlogd"]
+
+[service]
+type   = "oneshot"
+exec   = '/bin/sh -c "echo chatty-out; echo chatty-err >&2; echo chatty-last"'
+output = "log"

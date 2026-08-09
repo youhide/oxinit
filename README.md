@@ -29,7 +29,9 @@ in PID 1 than anywhere else in the system.
 2. **No panic in PID 1.** `panic = "unwind"`, never `abort` — an abort in PID 1
    is a kernel panic. Every event-loop handler is wrapped in `catch_unwind`. The
    `oxinit` crate denies `unwrap`, `expect`, `panic`, and slice indexing. If the
-   loop cannot continue, it spawns `/bin/sh` on the console. It never exits.
+   loop cannot continue, it spawns `/bin/sh` on the console. It exits in exactly
+   one place: the end of an ordered shutdown in a container, where the container
+   lives only as long as its PID 1 does.
 3. **Unsafe is quarantined.** Syscalls go through `rustix`. Whatever `unsafe`
    remains lives in one module, with a `// SAFETY:` comment per block stating
    the invariant.
@@ -48,49 +50,155 @@ after       = ["network-online"]
 requires    = ["network-online"]
 
 [service]
-type        = "notify"          # simple | forking | oneshot | notify
-exec        = "/usr/sbin/sshd -D"
-restart     = "on-failure"      # no | always | on-failure | on-abnormal
-restart-sec = "5s"
-user        = "root"
+type         = "notify"         # simple | forking | oneshot | notify
+exec         = "/usr/sbin/sshd -D"
+restart      = "on-failure"     # no | always | on-failure | on-abnormal
+restart-sec  = "5s"
+stop-sec     = "20s"
+watchdog-sec = "30s"
+user         = "sshd"
 
 [resources]
 memory-max = "256M"
 tasks-max  = 512
 ```
 
-Every key is specified in [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md).
+`requires` and `after` are both declared, and neither implies the other. "A
+needs B running" and "A must start after B" are different statements, and
+conflating them makes both impossible to express precisely.
 
-## Status
+Every key is specified in [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md). That
+document is the specification, not a description of the parser.
+
+A socket unit binds an address before anything starts, and names the service
+those descriptors belong to:
+
+```toml
+# /etc/oxinit/units/sshd-socket.toml
+
+[unit]
+description = "SSH socket"
+
+[socket]
+listen  = ["0.0.0.0:22", "[::]:22"]
+service = "sshd"
+```
+
+Nothing runs until something connects, and a restart does not refuse
+connections — the listening socket outlives the process serving them, so they
+queue in the kernel.
+
+## oxctl
+
+`oxctl` talks to PID 1 over `/run/oxinit/control.sock`. It is a separate
+process: a bug in the CLI kills the CLI.
 
 ```
-$ oxctl status sshd
-sshd.service - OpenSSH daemon
-     State: active (running) since 2026-08-08 09:14:22
-      Main: 812 (sshd)
-    Status: "Server listening on 0.0.0.0 port 22"
-    Memory: 4.1M (max 256M)
-     Tasks: 3 (max 512)
-  Restarts: 0
-    CGroup: /sys/fs/cgroup/oxinit.slice/sshd.service
+$ oxctl list
+banner       service   inactive      Boot banner
+console      service   inactive      Console shell
+default      target    active        Default target
+echo         service   inactive      Socket-activated echo service
+echo-socket  socket    active        Echo socket
+limited      service   active        Runs under a memory and task cap
+probe        service   active        sd_notify probe
 ```
 
-Memory and task counts are read from `memory.current` and `pids.current` in the
-service's cgroup.
+```
+$ oxctl status probe
+probe (service)
+  description  sd_notify probe
+  state        active
+  pid          11
+  status       probe up
+  memory       94208 bytes
+  tasks        1
+```
+
+`status` is what the service last sent as `STATUS=` over `sd_notify`. Memory
+and tasks are read from `memory.current` and `pids.current` in the service's
+cgroup, on demand — nothing is polled.
+
+`start`, `stop`, `restart` and `reload` do what they say. Every answer is
+immediate and says what was *asked for*, not what has finished: a stop ends
+when the unit's cgroup empties, and the one socket that has to stay responsive
+does not wait on the slowest thing on the machine.
+
+## Logs
+
+A service declaring `output = "log"` writes into a pipe rather than onto the
+console, and `oxlogd` turns that into `/var/log/oxinit/<unit>.log`:
+
+```
+$ oxctl logs chatty
+1786287692.803983 chatty-out
+1786287692.812454 chatty-err
+1786287692.812548 chatty-last
+```
+
+`stdout` and `stderr` share the pipe, so the order the service wrote them in
+survives. The timestamp is seconds and microseconds since the epoch, padded so
+the files sort as text — rendering it as a date is the reader's job, and not
+having a calendar in a log writer is worth more than pretty output. Rotation
+is by size, because bounded disk per unit is the property that matters.
+
+**PID 1 reads none of it.** It makes the pipe, gives the write end to the
+child, and passes the read end to `oxlogd` over a unix socket. A service
+writing a megabyte a second cannot make PID 1 do work, and a bug in a log
+writer kills a log writer.
+
+oxinit keeps its own copy of every read end, which is what makes an `oxlogd`
+restart invisible: the pipes are never closed, the services writing into them
+notice nothing, and the replacement is handed every descriptor again when it
+connects.
+
+`oxctl logs` reads the file directly rather than asking PID 1 for it. The
+control socket has to stay responsive, and bulk data is what would stop it
+being.
+
+## Shutdown
+
+`SIGTERM` stops every unit in the reverse of its start order, waits for each
+cgroup to empty, then syncs, remounts `/` read-only and calls `reboot(2)`.
+
+| Signal    | Action                                            |
+|-----------|---------------------------------------------------|
+| `SIGTERM` | Ordered shutdown, then power off.                 |
+| `SIGINT`  | Ordered shutdown, then reboot. Ctrl-Alt-Del.      |
+| `SIGPWR`  | Ordered shutdown, then power off.                 |
+| `SIGUSR1` | Ordered shutdown, then halt without cutting power.|
+| `SIGUSR2` | Report every unit's state. Changes nothing.       |
+
+Shutdown is a *state* the supervisor is in, not a routine that runs to
+completion: every unit is asked to stop, the ordinary event loop keeps running,
+and each event is also a chance to notice that the last one has gone. A
+blocking routine would have to re-implement the reaper, the timers and the
+cgroup notifications it is waiting on, during the one part of the boot where
+getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 6 are done. oxinit boots under QEMU and runs as a
-container's PID 1: it mounts the pseudo-filesystems, multiplexes signalfd,
-timerfd, the notify socket, the control socket and every service's
-`cgroup.events` on one epoll loop, parses TOML units, resolves their dependency
-graph, starts them in order, restarts them with exponential backoff, places
-each service in a cgroup v2 and applies its limits, drops privilege between
-fork and exec, binds and passes listening sockets, answers `oxctl`, and shuts
-the machine down in reverse order.
+Milestones 0 through 7 are done. oxinit boots under QEMU and runs as a
+container's PID 1.
 
-[ROADMAP.md](ROADMAP.md) has the breakdown, including what each milestone was
-verified against.
+| | |
+|---|---|
+| **M0** | Mounts, console, `signalfd`, reaping. Never exits. |
+| **M1** | TOML units, dependency graph, Kahn ordering, cycles refused at load. |
+| **M2** | State machine, restart policy with backoff, `sd_notify`, watchdog. |
+| **M3** | cgroup v2: placement between fork and exec, `[resources]`, `cgroup.kill`, privilege drop. |
+| **M4** | Socket activation: `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES`. |
+| **M5** | Ordered shutdown, the signal table, the control socket, `oxctl`. |
+| **M6** | Containers, and a console with a controlling terminal. |
+| **M7** | Logs: a pipe per service, `oxlogd`, rotation, `oxctl logs`. |
+
+One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
+control socket, every socket unit's listening descriptor and every service
+cgroup's `cgroup.events`. One thread. No async runtime.
+
+Nothing is scheduled after M7. [ROADMAP.md](ROADMAP.md) has the breakdown,
+including what each milestone was verified against and what was deferred out
+of it.
 
 ## Running it
 
@@ -110,6 +218,23 @@ qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "co
 
 Edit to boot takes a few seconds. `Ctrl-A X` exits QEMU. Setup details are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Two suites assert on that boot rather than asking you to watch it:
+
+```bash
+cargo xtask test-boot    # boots QEMU with a timeout, matches the serial log
+cargo xtask container    # runs it in Docker, checks the log and the exit code
+```
+
+The library crates test on any host, with no VM and no kernel:
+
+```bash
+cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service
+```
+
+That split is the point of the workspace. `oxinit-unit`, `oxinit-graph` and
+`oxinit-service` have no OS dependency at all, and the parser, the dependency
+semantics and the restart policy are where the logic errors are.
 
 ## In a container
 
@@ -169,7 +294,7 @@ oxinit does not, and will not:
 - Resolve DNS.
 - Implement an NTP client.
 - Manage network configuration.
-- Run containers.
+- Run containers. It runs *inside* one, as PID 1; it does not start one.
 - Boot the machine — it is not a bootloader.
 - Manage logins or sessions.
 

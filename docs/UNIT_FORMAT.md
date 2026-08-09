@@ -380,6 +380,44 @@ Failing to get the terminal does not fail the unit. A service that cannot be
 given job control is a nuisance; a console that will not start is a machine
 with no way in.
 
+### `output`
+
+- **Type:** string — `"console"`, `"log"`, or `"null"`
+- **Required:** no
+- **Default:** `"console"`
+
+Where the service's standard output and standard error go. They share one
+destination, and for `"log"` one pipe: the order in which a service wrote to
+its two streams is information, and two pipes would destroy it — they would be
+read independently and interleaved by whichever the reader reached first.
+
+| Value       | Where                                                      |
+|-------------|------------------------------------------------------------|
+| `"console"` | The descriptors oxinit itself has: the console on a machine, the runtime's pipes in a container. |
+| `"log"`     | `oxlogd`, which writes `/var/log/oxinit/<unit>.log`.        |
+| `"null"`    | `/dev/null`.                                                |
+
+`"console"` is the default, deliberately. oxinit does not move a service's
+output somewhere the operator did not ask for, and on a machine with no
+`oxlogd` a `"log"` default would be a pipe with no reader — output would back
+up until the service blocked on a write.
+
+**`"log"` needs `oxlogd`,** and a unit that wants it should say so:
+
+```toml
+after    = ["oxlogd"]
+requires = ["oxlogd"]
+```
+
+`oxlogd` is `type = "notify"`, so `after` on it means "once it can actually
+receive descriptors", not merely "once it has been exec'd".
+
+A unit whose output cannot be routed fails to start rather than falling back
+to the console. `output` is a statement about where a service's output goes,
+and quietly sending it somewhere else is a different statement.
+
+Standard *input* is untouched by this key.
+
 ## `[resources]`
 
 Limits applied to the service's cgroup. An absent key means the kernel default,

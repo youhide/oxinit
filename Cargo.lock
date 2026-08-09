@@ -67,6 +67,7 @@ name = "oxctl"
 version = "0.0.0"
 dependencies = [
  "oxinit-ipc",
+ "oxinit-log",
  "rustix",
 ]
 
@@ -78,6 +79,7 @@ dependencies = [
  "oxinit-cgroup",
  "oxinit-graph",
  "oxinit-ipc",
+ "oxinit-log",
  "oxinit-service",
  "oxinit-unit",
  "oxinit-user",
@@ -110,6 +112,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxinit-log"
+version = "0.0.0"
+
+[[package]]
 name = "oxinit-service"
 version = "0.0.0"
 dependencies = [
@@ -130,6 +136,14 @@ name = "oxinit-user"
 version = "0.0.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "oxlogd"
+version = "0.0.0"
+dependencies = [
+ "oxinit-log",
+ "rustix",
 ]
 
 [[package]]

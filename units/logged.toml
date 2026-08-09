@@ -1,0 +1,21 @@
+# Prints what oxlogd wrote for `chatty`, so a boot can assert on it.
+#
+# The substitution is what makes the assertion mean something. It matches the
+# record format — digits, a dot, digits, a space — and rewrites `chatty-` to
+# `seen-`, so a boot log containing `chatty-out` anywhere is a boot where the
+# output went to the console instead, which is exactly what `output = "log"`
+# says it must not do. A format change that dropped the timestamp fails here
+# too, because then there is nothing to strip.
+#
+# The sleep is a race, and an admitted one. `chatty` exiting is what closes its
+# pipe, and oxlogd reading the EOF and flushing happens in another process on
+# its own schedule. Ordering can say this runs after chatty stopped; it cannot
+# say another process has caught up.
+[unit]
+description = "Reads chatty's log back"
+after       = ["chatty"]
+requires    = ["chatty"]
+
+[service]
+type = "oneshot"
+exec = '''/bin/sh -c "/bin/sleep 1; /bin/oxctl logs chatty | /bin/sed -e 's@^[0-9][0-9.]* chatty-@chatty.log: seen-@'"'''

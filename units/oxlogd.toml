@@ -1,0 +1,20 @@
+# The log writer. A service like any other — it is restarted when it fails,
+# and oxinit keeps every read end so a restart is invisible to the services it
+# was shipping.
+#
+# `notify`, so that a unit ordered after this one starts only once oxlogd has
+# actually connected. Declaring the ordering against a `simple` unit would
+# guarantee only that the process had been exec'd, which is not the same thing
+# as being able to receive anything.
+#
+# Its own output is `console`, and has to be: a log writer routed into itself
+# would be writing into a pipe it is the only reader of.
+[unit]
+description = "Log writer"
+
+[service]
+type        = "notify"
+exec        = "/bin/oxlogd"
+restart     = "always"
+restart-sec = "500ms"
+output      = "console"

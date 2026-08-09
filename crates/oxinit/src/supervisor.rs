@@ -1,20 +1,23 @@
 //! Loading units, starting them in order, and keeping them running.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::process::{Child, Command};
 use std::time::Duration;
 
+use rustix::fs::OFlags;
 use rustix::process::{Pid, Signal};
 
 use oxinit_cgroup::Cgroup;
 use oxinit_ipc::{Request, Response, UnitStatus};
 use oxinit_service::{Exit, Instance, State, StopCause};
-use oxinit_unit::{Kind, Resources, ServiceType, Unit};
+use oxinit_unit::{Kind, Output, Resources, ServiceType, Unit};
 
 use crate::cgroup::{self, Cgroups};
+use crate::error::Error;
 use crate::event::{EventLoop, Source};
 use crate::listen::Sockets;
+use crate::logs::Logs;
 use crate::notify::{self, Notify};
 use crate::reap;
 use crate::shutdown::{Action, Shutdown};
@@ -32,6 +35,14 @@ pub struct Supervisor {
     pub notify: Notify,
     pub cgroups: Cgroups,
     pub sockets: Sockets,
+    pub logs: Logs,
+    /// Units an `oxctl restart` is waiting to start again.
+    ///
+    /// Separate from the restart policy, and deliberately: a requested stop
+    /// overrides the policy, so a unit stopped this way lands `Inactive` and
+    /// the policy has nothing to say about it. Something else has to remember
+    /// that a start was asked for, and this is it.
+    pending_restart: BTreeSet<String>,
     /// Set once the machine is going down. Nothing starts after this, and
     /// every event is also a chance to notice that everything has stopped.
     shutdown: Option<Shutdown>,
@@ -40,7 +51,13 @@ pub struct Supervisor {
 impl Supervisor {
     /// Load and resolve. Starting is a separate step so the caller can
     /// register the timerfd with epoll first.
-    pub fn load(hostname: &str, timers: Timers, notify: Notify, cgroups: Cgroups) -> Self {
+    pub fn load(
+        hostname: &str,
+        timers: Timers,
+        notify: Notify,
+        cgroups: Cgroups,
+        logs: Logs,
+    ) -> Self {
         let loaded = oxinit_unit::load_default(hostname);
         for error in &loaded.errors {
             eprintln!("oxinit: {error}");
@@ -57,7 +74,9 @@ impl Supervisor {
                 timers,
                 notify,
                 cgroups,
+                logs,
                 sockets: Sockets::new(),
+                pending_restart: BTreeSet::new(),
                 shutdown: None,
                 hostname: hostname.to_owned(),
             };
@@ -84,7 +103,9 @@ impl Supervisor {
             timers,
             notify,
             cgroups,
+            logs,
             sockets: Sockets::new(),
+            pending_restart: BTreeSet::new(),
             shutdown: None,
             hostname: hostname.to_owned(),
         };
@@ -223,12 +244,10 @@ impl Supervisor {
             .service()
             .map_or_else(Resources::default, |service| service.resources);
 
-        let cgroup = self.cgroups.get(name);
-
         // A limit that cannot be applied is not a degraded mode, it is a
         // different configuration. The unit asked to be capped; running it
         // uncapped is not a smaller version of that.
-        if let Err(e) = apply_resources(&resources, cgroup) {
+        if let Err(e) = apply_resources(&resources, self.cgroups.get(name)) {
             if let Some(instance) = self.instances.get_mut(name) {
                 instance.failed_to_start();
             }
@@ -236,11 +255,27 @@ impl Supervisor {
             return;
         }
 
+        // A pipe per start, so the shipper sees this generation end. A unit
+        // whose output cannot be routed is not started with it going somewhere
+        // else — `output` is a statement about where a service's output goes,
+        // and quietly putting it on the console instead is a different one.
+        let output = match self.output_for(name) {
+            Ok(output) => output,
+            Err(e) => {
+                if let Some(instance) = self.instances.get_mut(name) {
+                    instance.failed_to_start();
+                }
+                eprintln!("oxinit: {name}: {e}");
+                return;
+            }
+        };
+
+        let cgroup = self.cgroups.get(name);
         let listen = self.sockets.for_service(name);
         let spawned = self
             .instances
             .get(name)
-            .map(|instance| spawn(&instance.unit, cgroup, &listen));
+            .map(|instance| spawn(&instance.unit, cgroup, &listen, output));
 
         let Some(spawned) = spawned else {
             return;
@@ -287,6 +322,37 @@ impl Supervisor {
                 instance.failed_to_start();
                 eprintln!("oxinit: {name}: {e}");
             }
+        }
+    }
+
+    /// The descriptor a unit's `stdout` and `stderr` should land on, if not
+    /// oxinit's own.
+    ///
+    /// `Console` is `None` — inheriting is what oxinit already does and what
+    /// costs nothing. The other two each open something, and a failure is the
+    /// unit's failure: a service told to write to a log or to nothing at all
+    /// has not been started correctly if its output goes to the console
+    /// instead.
+    fn output_for(&mut self, name: &str) -> Result<Option<OwnedFd>, Error> {
+        let output = self
+            .instances
+            .get(name)
+            .and_then(|instance| instance.unit.service())
+            .map_or(Output::Console, |service| service.output);
+
+        match output {
+            Output::Console => Ok(None),
+            Output::Log => self.logs.pipe(name).map(Some),
+            Output::Null => rustix::fs::open(
+                "/dev/null",
+                OFlags::WRONLY | OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map(Some)
+            .map_err(|source| Error::Open {
+                path: "/dev/null".to_owned(),
+                source,
+            }),
         }
     }
 
@@ -476,6 +542,15 @@ impl Supervisor {
                 }
             }
             None => println!("oxinit: {name} is {}", instance.state),
+        }
+
+        // An `oxctl restart` is a stop followed by a start, and this is where
+        // the stop finished. Deliberately after the policy above rather than
+        // instead of it: the two cannot both apply, because a requested stop
+        // is what stops the policy applying at all.
+        if self.pending_restart.remove(name) {
+            println!("oxinit: {name} stopped; starting it again");
+            self.start(name);
         }
     }
 
@@ -799,6 +874,17 @@ impl Supervisor {
     }
 
     /// Start a unit again once it has finished stopping.
+    ///
+    /// Remembered rather than timed. A stop ends when the unit's cgroup
+    /// empties, which is an event, and waiting `stop-sec` for it instead would
+    /// hold a restart for thirty seconds on a unit that stopped in one — or,
+    /// as this did before M7's tests reached it, never start it again at all:
+    /// the alarm it scheduled only acted on a unit in `Restarting`, and a
+    /// requested stop ends `Inactive` precisely because it overrides the
+    /// restart policy.
+    ///
+    /// No backstop timer. A stop that does not finish on its own is escalated
+    /// to `cgroup.kill` by `stop-sec`, and that path ends here too.
     fn restart_when_stopped(&mut self, name: &str) {
         let Some(instance) = self.instances.get(name) else {
             return;
@@ -810,22 +896,7 @@ impl Supervisor {
             return;
         }
 
-        let stop_sec = instance
-            .unit
-            .service()
-            .map_or(Duration::from_secs(30), |service| service.stop_sec);
-
-        // Checked again when it fires, so a unit that stopped sooner is
-        // started sooner by the settle path rather than waited on here.
-        let alarm = Alarm::Restart {
-            unit: name.to_owned(),
-        };
-        if let Err(e) = self
-            .timers
-            .schedule(stop_sec + Duration::from_millis(50), alarm)
-        {
-            eprintln!("oxinit: {e}");
-        }
+        self.pending_restart.insert(name.to_owned());
     }
 
     fn describe(&self, instance: &Instance) -> UnitStatus {
@@ -1035,6 +1106,7 @@ fn spawn(
     unit: &Unit,
     cgroup: Option<&Cgroup>,
     listen: &[(&str, BorrowedFd<'_>)],
+    output: Option<OwnedFd>,
 ) -> Result<Child, String> {
     let service = unit.service().ok_or_else(|| "not a service".to_owned())?;
 
@@ -1096,6 +1168,7 @@ fn spawn(
             listen_fds,
             identity,
             image: Some(image),
+            output,
             // Declared, never inferred. Every service on a machine that boots
             // to a console inherits a tty on stdin, and giving each one a
             // session would have them take the terminal from one another, one

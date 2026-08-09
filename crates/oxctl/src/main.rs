@@ -7,6 +7,7 @@
 //! Not PID 1. This process may panic, may exit, and is held to none of the
 //! rules the `oxinit` crate carries.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
@@ -22,7 +23,11 @@ commands:
   start <unit>      start a unit now
   stop <unit>       stop a unit; the restart policy does not apply
   restart <unit>    stop, then start once it is down
+  logs <unit>       what the unit has written, from /var/log/oxinit
   reload            re-read the unit directories
+
+`logs` reads the file directly. It does not go through oxinit: the control
+socket has to stay responsive, and bulk data is what would stop it being.
 
 oxinit answers immediately. `stop` means the stop was asked for, not that
 it has finished — a unit is not stopped until its cgroup is empty.";
@@ -48,6 +53,12 @@ fn run(args: &[String]) -> Result<(), String> {
         ("status", None) => Request::List,
         ("status", Some(unit)) => Request::Status { unit },
         ("reload", _) => Request::Reload,
+
+        // Not a request at all. `oxlogd` writes files and this reads them,
+        // because putting a service's whole output through the one socket
+        // that has to stay responsive is exactly what would stop it being.
+        ("logs", Some(unit)) => return logs(&unit, tail(args)),
+        ("logs", None) => return Err(format!("logs needs a unit name\n\n{USAGE}")),
 
         ("start", Some(unit)) => Request::Start { unit },
         ("stop", Some(unit)) => Request::Stop { unit },
@@ -76,6 +87,41 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Response::Error { message } => Err(message),
     }
+}
+
+/// `-n N`, if given.
+fn tail(args: &[String]) -> Option<usize> {
+    args.iter()
+        .position(|arg| arg == "-n")
+        .and_then(|at| args.get(at + 1))
+        .and_then(|value| value.parse().ok())
+}
+
+/// Print what a unit has written.
+///
+/// Only the live file. The rotated generations are `<unit>.log.1` and up in
+/// the same directory, and reading them is `cat` — there is no index and no
+/// merge to do, which is most of the reason the format is plain text.
+fn logs(unit: &str, tail: Option<usize>) -> Result<(), String> {
+    let path = oxinit_log::path(Path::new(oxinit_log::LOG_DIR), unit);
+
+    let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "no logs for `{unit}` at {}\n\
+             is oxlogd running, and does the unit declare `output = \"log\"`?",
+            path.display()
+        ),
+        _ => format!("read {}: {e}", path.display()),
+    })?;
+
+    let lines: Vec<&str> = text.lines().collect();
+    let from = tail.map_or(0, |n| lines.len().saturating_sub(n));
+
+    for line in lines.get(from..).unwrap_or_default() {
+        println!("{line}");
+    }
+
+    Ok(())
 }
 
 /// One request, one reply.

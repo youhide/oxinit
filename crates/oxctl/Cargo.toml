@@ -15,4 +15,5 @@ publish.workspace = true
 # A parser generator would be more dependency than argument.
 [dependencies]
 oxinit-ipc = { path = "../oxinit-ipc" }
+oxinit-log = { path = "../oxinit-log" }
 rustix = { workspace = true, features = ["net"] }

@@ -118,6 +118,7 @@ Arriving with the milestones that introduce them:
 
 ```bash
 cargo test -p oxinit-unit -p oxinit-graph   # M1: host tests, no VM
+cargo test -p oxinit-log                    # M7: records, splitting, rotation
 cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
 cargo xtask container                       # M6: runs it in Docker, same
 ```

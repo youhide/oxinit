@@ -29,6 +29,11 @@ pub enum Source {
     Control,
     /// A connected control client sent something, or hung up.
     Client(u32),
+    /// `oxlogd` is connecting.
+    LogSocket,
+    /// The connected `oxlogd` hung up. It never sends anything, so that is the
+    /// only reason its socket becomes readable.
+    LogShipper,
 }
 
 /// epoll carries one `u64` per registration and hands it back unchanged, so
@@ -50,6 +55,8 @@ impl Source {
             Source::Timer => (KIND_FIXED, 1),
             Source::Notify => (KIND_FIXED, 2),
             Source::Control => (KIND_FIXED, 3),
+            Source::LogSocket => (KIND_FIXED, 4),
+            Source::LogShipper => (KIND_FIXED, 5),
             Source::Cgroup(id) => (KIND_CGROUP, id),
             Source::Socket(id) => (KIND_SOCKET, id),
             Source::Client(id) => (KIND_CLIENT, id),
@@ -65,6 +72,8 @@ impl Source {
                 1 => Some(Source::Timer),
                 2 => Some(Source::Notify),
                 3 => Some(Source::Control),
+                4 => Some(Source::LogSocket),
+                5 => Some(Source::LogShipper),
                 _ => None,
             },
             KIND_CGROUP => Some(Source::Cgroup(id)),

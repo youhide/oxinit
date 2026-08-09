@@ -31,6 +31,7 @@ mod control;
 mod error;
 mod event;
 mod listen;
+mod logs;
 mod mounts;
 mod notify;
 mod reap;
@@ -176,7 +177,19 @@ fn boot() -> ! {
         }
     };
 
-    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify, cgroups);
+    // Without a log socket a machine still boots and still supervises. What
+    // stops working is `output = "log"`, and it says so against the unit that
+    // asked for it rather than as one fatal error here.
+    let logs = match logs::Logs::bind() {
+        Ok(logs) => logs,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            eprintln!("oxinit: continuing without log shipping");
+            logs::Logs::unavailable()
+        }
+    };
+
+    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify, cgroups, logs);
 
     let registered = events
         .register(&signals, event::Source::Signals)
@@ -185,6 +198,12 @@ fn boot() -> ! {
 
     if let Some(control) = control.as_ref() {
         if let Err(e) = events.register(control.as_fd(), event::Source::Control) {
+            eprintln!("oxinit: {e}");
+        }
+    }
+
+    if let Some(fd) = supervisor.logs.listener() {
+        if let Err(e) = events.register(fd, event::Source::LogSocket) {
             eprintln!("oxinit: {e}");
         }
     }
@@ -292,6 +311,8 @@ fn run(
                 event::Source::Socket(id) => supervisor.on_socket(*id),
                 event::Source::Control => on_connect(control, events),
                 event::Source::Client(id) => on_request(control, events, supervisor, *id),
+                event::Source::LogSocket => on_shipper(supervisor, events),
+                event::Source::LogShipper => on_shipper_gone(supervisor, events),
             }));
 
             if result.is_err() {
@@ -423,6 +444,41 @@ fn on_request(
     // that no longer exists.
     let _ = control.fd(id).map(|fd| events.deregister(fd));
     control.close(id);
+}
+
+/// `oxlogd` connected.
+///
+/// Registered with epoll like everything else, and for the same reason: the
+/// only thing that ever arrives on that socket is a hangup, and noticing it
+/// must not cost a poll of its own.
+fn on_shipper(supervisor: &mut supervisor::Supervisor, events: &event::EventLoop) {
+    if !supervisor.logs.accept() {
+        return;
+    }
+
+    let Some(fd) = supervisor.logs.shipper() else {
+        return;
+    };
+
+    if let Err(e) = events.register(fd, event::Source::LogShipper) {
+        eprintln!("oxinit: {e}");
+        supervisor.logs.disconnect();
+    }
+}
+
+/// The shipper's socket became readable, which for a peer that never sends
+/// anything means it closed.
+fn on_shipper_gone(supervisor: &mut supervisor::Supervisor, events: &event::EventLoop) {
+    if supervisor.logs.still_connected() {
+        return;
+    }
+
+    // Deregistered before the descriptor closes, or epoll is left holding one
+    // that no longer exists.
+    if let Some(fd) = supervisor.logs.shipper() {
+        let _ = events.deregister(fd);
+    }
+    supervisor.logs.disconnect();
 }
 
 /// Block every signal, then open the signalfd that replaces them.

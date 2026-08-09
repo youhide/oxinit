@@ -1,0 +1,17 @@
+[package]
+name = "oxinit-log"
+version = "0.0.0"
+description = "Log record format, line splitting, and rotation policy"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Shared by oxinit, oxlogd and oxctl, so all three agree on where a log is and
+# what a line in it looks like.
+#
+# No dependencies at all, and no syscalls. Splitting a read into records,
+# bounding a line that never ends, and deciding when to rotate are where the
+# bugs would be, and none of it needs a descriptor to test.
+[dependencies]

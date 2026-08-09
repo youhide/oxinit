@@ -72,6 +72,12 @@ pub enum Error {
 
     #[error("control socket: {0}")]
     Control(#[source] rustix::io::Errno),
+
+    #[error("log socket: {0}")]
+    Logs(#[source] rustix::io::Errno),
+
+    #[error("no log socket; `output = \"log\"` needs one")]
+    NoLogSocket,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

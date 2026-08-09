@@ -9,6 +9,10 @@ description = "Default target"
 requires    = ["console"]
 wants       = [
     "banner",
+    "oxlogd",
+    "chatty",
+    "logged",
+    "ticker",
     "quiet",
     "probe",
     "hangs",
@@ -21,4 +25,4 @@ wants       = [
     "poke",
     "absent",
 ]
-after       = ["console", "banner"]
+after       = ["console", "banner", "logged"]

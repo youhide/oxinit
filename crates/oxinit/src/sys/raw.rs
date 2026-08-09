@@ -127,6 +127,10 @@ pub struct ChildSetup {
     pub listen_fds: Vec<OwnedFd>,
     /// Who to become. `None` leaves the child as root.
     pub identity: Option<Identity>,
+    /// Where `stdout` and `stderr` go, if not where oxinit's own do.
+    ///
+    /// One descriptor for both. See `oxinit_unit::Output`.
+    pub output: Option<OwnedFd>,
     /// Start a session and claim stdin as its controlling terminal.
     ///
     /// For the console shell and nothing else. See [`start_session`].
@@ -172,6 +176,14 @@ pub fn setup_child(command: &mut Command, mut setup: ChildSetup) {
                 write_all(fd.as_raw_fd(), b"0")?;
             }
 
+            // Before the listening descriptors, not after. Those are placed
+            // at fd 3 upward, and this one arrived at whatever number was
+            // free — which can be inside that range, and would then be
+            // overwritten before it had been used.
+            if let Some(fd) = setup.output.as_ref() {
+                redirect_output(fd.as_raw_fd())?;
+            }
+
             place_descriptors(&setup.listen_fds)?;
 
             if let Some(identity) = setup.identity.as_ref() {
@@ -209,6 +221,31 @@ fn place_descriptors(fds: &[OwnedFd]) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
+    Ok(())
+}
+
+/// Put `fd` on both standard output and standard error.
+///
+/// `dup2` clears `FD_CLOEXEC` on the descriptor it creates, which is what
+/// makes these survive the exec — the pipe oxinit opened is `CLOEXEC` and
+/// would otherwise close.
+///
+/// Standard input is left alone. A service that wanted to read from the
+/// console still can, and pointing it at the write end of a log pipe would be
+/// worse than useless.
+///
+/// Runs in the child, between fork and exec.
+fn redirect_output(fd: i32) -> io::Result<()> {
+    // SAFETY: `dup2` takes two descriptor numbers and returns one. The source
+    // is owned by the caller and open; the targets are 1 and 2, and the source
+    // is neither — it came from `pipe2` or from opening /dev/null, both of
+    // which allocate above oxinit's own stdio.
+    for target in [1, 2] {
+        if unsafe { libc::dup2(fd, target) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
     Ok(())
 }
 
