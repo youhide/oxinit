@@ -793,3 +793,13 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
   `cargo xtask test-boot` builds the image, boots it with a timeout, captures
   the serial log, and matches expected lines. A test that hangs fails on the
   timeout rather than blocking forever.
+- **Container tests** are the same thing for a runtime that is not QEMU.
+  `cargo xtask container` packs the *same staged root filesystem* as a `FROM
+  scratch` image, runs it, waits for the boot, asks the runtime to stop it the
+  way an operator would, and asserts on the log and the exit code. One tree,
+  two ways of packing it: a container test running a different image from the
+  QEMU test would not be testing the same thing.
+
+  The exit code is the assertion that matters. `SIGKILL` after a grace period
+  is 137, and every `docker stop` produced it until PID 1 both handled
+  `SIGTERM` and exited afterwards.

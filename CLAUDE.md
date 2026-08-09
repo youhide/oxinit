@@ -92,6 +92,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test -p oxinit-unit -p oxinit-graph   # host tests, fast
 cargo xtask boot                            # build + boot in QEMU
 cargo xtask test-boot                       # boot and assert on serial output
+cargo xtask container                       # build, run, and assert in Docker
 ```
 
 `cargo xtask boot` builds `oxinit` for `x86_64-unknown-linux-musl`, packs a

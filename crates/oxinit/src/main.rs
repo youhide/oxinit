@@ -243,8 +243,13 @@ fn report_mounts(mounted: &mounts::Mounts) {
     }
 
     if !mounted.refused.is_empty() {
+        let them = if mounted.refused.len() == 1 {
+            "it"
+        } else {
+            "them"
+        };
         eprintln!(
-            "oxinit: not permitted to mount {}; continuing without them",
+            "oxinit: not permitted to mount {}; continuing without {them}",
             mounted.refused.join(", ")
         );
     }
