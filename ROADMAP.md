@@ -640,7 +640,77 @@ release file read by a unit, `ld-musl-x86_64.so.1` reported by another, and
 `uid=65534(nobody) gid=65534(nobody) groups=900(oxinit),65534(nobody)` from
 the distribution's own user database rather than from a file xtask wrote.
 
-## Beyond M10
+## M11 — Dependencies that mean what the document says
+
+**Done.**
+
+[docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md) describe four behaviours the supervisor
+does not have. `conflicts` appears nowhere in the `oxinit` crate at all;
+`requires` and `after` appear only in the graph, which uses them to compute a
+start *order* and then hands that order to a loop that starts everything as
+fast as it can.
+
+- [x] `after` gates starting, not just ordering: a unit does not start until
+      every unit it is `after` has finished activating.
+- [x] `requires`: a unit whose requirement has failed fails instead of
+      starting.
+- [x] `conflicts`: starting a unit stops the ones it excludes, symmetrically,
+      whichever side declared it.
+- [x] `start-sec`: a bound on `Activating`, so a service that never becomes
+      ready fails instead of waiting forever.
+- [x] An ordering assertion in `test-boot`, because "A appears before B" is
+      not something substring matching can say.
+
+**The order was real; the waiting was not.** Kahn's algorithm has been correct
+since M1 and produces a genuine topological order. What consumed it was a
+`for` loop calling `start` on each name in turn — and `start` returns as soon
+as the child is forked. A `notify` service is `Activating` until `READY=1`
+arrives, which is an event, and by then the loop had started everything else.
+So `after` meant "issued in this order", where the document says "not started
+until every named unit has finished activating".
+
+Making that real turns boot from a loop into a queue drained by the same event
+loop as everything else — which is the shape shutdown already has, and for the
+same reason.
+
+**Which is why `start-sec` is in the same milestone.** Gating on activation
+without bounding it means one service that never signals readiness stalls the
+whole boot with nothing to break the deadlock. `Activating` has been unbounded
+since M2, and ARCHITECTURE has claimed a start timeout since M2 as well —
+transition (3) lists "the start timeout expired" as a way into `Failed`.
+Nothing implemented it.
+
+A second bug the new units found, and an older one: `begin_shutdown` walked
+the resolved order and nothing else, so a unit that was running but not
+reachable from `default` — started by a connection, or by `oxctl` — was never
+asked to stop. `settled` waits for every unit, so the machine sat there until
+the ninety-second whole-shutdown deadline and then went down anyway with a
+service still holding whatever it held. Nothing had caught it because the only
+such unit until now was socket-activated and exited on its own before anyone
+asked. Shutdown walks the resolved order reversed, then everything else.
+
+`test-boot` grew an ordering assertion, because "A appears before B" is not
+something substring matching can say — and both lines are present whether the
+waiting happened or not. The container suite deliberately does not run it:
+`docker logs` hands back stdout and stderr as separate streams, so
+concatenating them destroys the interleaving, and asserting an order the
+harness cannot observe would be asserting nothing.
+
+Verified under QEMU, both architectures, and against a real Alpine userspace:
+
+- `slow` never sends `READY=1`, fails its two-second `start-sec`, and only
+  then does `patient` — declared `after = ["slow"]` — start. Asserted as a
+  sequence.
+- `needy` requires `broken`, which exits non-zero. oxinit refuses to start it
+  and says which requirement failed; the boot log is checked for the absence
+  of anything `needy` would have printed.
+- `oxctl start beta` stops `alpha` first, though `alpha` names `beta` nowhere.
+
+29 checks on each architecture, 31 against the distribution image, 146 host
+tests.
+
+## Beyond M11
 
 Not planned, not designed, listed only so the questions have an answer:
 

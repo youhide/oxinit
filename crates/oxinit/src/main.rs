@@ -320,6 +320,15 @@ fn run(
             }
         }
 
+        // A unit finishes activating as an event like any other, and this is
+        // where whatever was ordered after it gets its turn. Once per wake-up
+        // rather than from each of the dozen places a unit can become ready —
+        // idempotent, and it cannot be forgotten in a path added later.
+        let result = catch_unwind(AssertUnwindSafe(|| supervisor.pump()));
+        if result.is_err() {
+            eprintln!("oxinit: start queue panicked; continuing");
+        }
+
         // One reconciliation per wake-up rather than an arm/disarm call inside
         // every handler that can change a service's state. Idempotent, and it
         // cannot be forgotten in a path added later.

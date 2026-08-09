@@ -1,0 +1,8 @@
+# Half of a conflicting pair. Runs at boot; `beta` displaces it.
+[unit]
+description = "Excluded by beta"
+
+[service]
+exec     = "/bin/sleep 600"
+restart  = "no"
+stop-sec = "1s"

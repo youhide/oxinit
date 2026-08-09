@@ -271,6 +271,18 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("oxinit-m8: stamp fired", "M8: the service it named ran"),
     (
+        "requires `broken`, which failed; not starting",
+        "M11: a failed requirement fails the unit that needed it",
+    ),
+    (
+        "beta conflicts with alpha; stopping it",
+        "M11: conflicts is enforced, and symmetric — alpha never mentions beta",
+    ),
+    (
+        "oxinit: started beta",
+        "M11: and the excluding unit came up",
+    ),
+    (
         "oxinit: tick-timer will start stamp in 3s",
         "M8: and re-arms with interval, so it fires again",
     ),
@@ -284,6 +296,21 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("oxinit: power off", "M5: reboot(2) with the right command"),
 ];
+
+/// Lines that must appear, in this order relative to each other.
+///
+/// Only checkable where the log is one stream. See the container suite, which
+/// passes an empty sequence for that reason.
+///
+/// "A before B" is not something substring matching can say, and it is the
+/// only thing that distinguishes `after` gating a start from `after` merely
+/// deciding what order starts were issued in. Both lines are present either
+/// way; only the sequence says the waiting happened.
+const SEQUENCE: &[(&str, &str, &str)] = &[(
+    "oxinit: slow did not start in time",
+    "oxinit-m11: patient started",
+    "M11: `after` waits for activation to finish, not just for a start to be issued",
+)];
 
 /// Lines that must not appear. A boot that logs one of these has failed even
 /// if everything else is present.
@@ -394,7 +421,7 @@ fn test_boot(arch: Arch, args: &[String]) -> Result<(), String> {
         )]
     };
 
-    check(&text, EXPECTED, FORBIDDEN, failures)
+    check(&text, EXPECTED, FORBIDDEN, SEQUENCE, failures)
 }
 
 /// Wait for QEMU, killing it if it overruns. `true` if it exited on its own,
@@ -422,6 +449,7 @@ fn check(
     text: &str,
     expected: &[(&str, &str)],
     forbidden: &[&str],
+    sequence: &[(&str, &str, &str)],
     mut failures: Vec<String>,
 ) -> Result<(), String> {
     for (needle, proves) in expected {
@@ -435,6 +463,18 @@ fn check(
     for needle in forbidden {
         if text.contains(needle) {
             failures.push(format!("log contains `{needle}`"));
+        }
+    }
+
+    for (first, second, proves) in sequence {
+        match (text.find(first), text.find(second)) {
+            (Some(a), Some(b)) if a < b => println!("  ok    {proves}"),
+            (Some(_), Some(_)) => {
+                failures.push(format!("`{second}` came before `{first}` — {proves}"));
+            }
+            _ => failures.push(format!(
+                "`{first}` and `{second}` are not both present — {proves}"
+            )),
         }
     }
 
@@ -570,7 +610,7 @@ fn test_distro(args: &[String]) -> Result<(), String> {
     let mut expected = EXPECTED.to_vec();
     expected.extend_from_slice(EXPECTED_DISTRO);
 
-    check(&text, &expected, FORBIDDEN, failures)
+    check(&text, &expected, FORBIDDEN, SEQUENCE, failures)
 }
 
 /// Assemble the initramfs from inside the distribution's own image.
@@ -790,7 +830,17 @@ fn drive(engine: &str, privileged: bool) -> Result<(), String> {
         expected.extend_from_slice(EXPECTED_PRIVILEGED);
     }
 
-    check(&logs(engine)?, &expected, FORBIDDEN_CONTAINER, failures)
+    // No sequence. `docker logs` hands back stdout and stderr as separate
+    // streams, so concatenating them destroys the interleaving — and
+    // asserting an order the harness cannot observe would be asserting
+    // nothing. The two QEMU suites read one serial port and can.
+    check(
+        &logs(engine)?,
+        &expected,
+        FORBIDDEN_CONTAINER,
+        &[],
+        failures,
+    )
 }
 
 /// Restart `oxlogd` under a running `ticker` and check the log keeps growing.

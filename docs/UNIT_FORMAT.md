@@ -319,6 +319,29 @@ A unit that had to be killed this way ends in `Failed` rather than `Inactive`,
 even when the stop was requested. It did not stop when it was asked to, and
 that is worth reporting.
 
+### `start-sec`
+
+- **Type:** duration string
+- **Required:** no
+- **Default:** `"90s"`
+
+How long the service may stay `Activating` before it has failed.
+
+What "activating" means depends on `type`: for `oneshot`, until the process
+exits; for `notify`, until `READY=1` arrives; for `forking`, until the initial
+process exits and the cgroup is still populated. A `simple` service is
+`Active` the moment its `exec` succeeds, so this never applies to one.
+
+Expiring sends the unit through the ordinary stop path — `SIGTERM`, then
+`cgroup.kill` after `stop-sec` — because a service that never signalled
+readiness is still a service that is running. It ends `Failed`, and the
+`restart` policy applies exactly as it would to a crash.
+
+**This is what stops one service holding the whole boot open.** A unit is not
+started until every unit it is `after` has finished activating, so without a
+bound on activation, one service that never becomes ready is a boot that never
+finishes. The default is generous because it is a backstop and not a schedule.
+
 ### `watchdog-sec`
 
 - **Type:** duration string

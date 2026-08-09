@@ -1,0 +1,11 @@
+# Ordered after a unit that never becomes ready. It must not start until
+# `slow` has finished activating — which, for `slow`, means failing its
+# `start-sec`. Asserted as an order, not as a presence: both lines appear
+# either way, and only the sequence says the waiting happened.
+[unit]
+description = "Waits for slow to stop activating"
+after       = ["slow"]
+
+[service]
+type = "oneshot"
+exec = "/bin/echo oxinit-m11: patient started"
