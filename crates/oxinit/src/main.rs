@@ -72,13 +72,10 @@ fn boot() -> ! {
         eprintln!("oxinit: {e}");
     }
 
-    let hostname = match mounts::set_hostname() {
-        Ok(name) => name,
-        Err(e) => {
-            eprintln!("oxinit: {e}");
-            "localhost".to_owned()
-        }
-    };
+    let (hostname, failure) = mounts::set_hostname();
+    if let Some(e) = failure {
+        eprintln!("oxinit: {e}; using the name already set, {hostname}");
+    }
 
     // Signals become event loop input rather than interruptions. Blocking must
     // happen before the signalfd is created: a signal that is not blocked is

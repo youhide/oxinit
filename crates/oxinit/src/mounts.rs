@@ -101,17 +101,37 @@ fn mount_one(spec: &Spec) -> Result<()> {
     }
 }
 
-/// Read the hostname from `/etc/hostname`, falling back to `localhost`.
+/// Set the hostname from `/etc/hostname`, and report the name that is
+/// actually in effect.
 ///
-/// Returns the name it set, which also feeds the `%H` unit specifier.
-pub fn set_hostname() -> Result<String> {
+/// The returned name feeds the `%H` unit specifier, so it has to be what the
+/// machine is called, not what oxinit wanted to call it. When `sethostname` is
+/// refused — which is what happens without `CAP_SYS_ADMIN`, so on every
+/// container — the name already set is read back rather than assumed. Assuming
+/// it was `localhost` made `%H` a lie exactly where it was most likely to be
+/// wrong.
+pub fn set_hostname() -> (String, Option<Error>) {
     let raw = std::fs::read("/etc/hostname").unwrap_or_default();
-    let name = raw
+    let wanted = raw
         .split(|b| *b == b'\n')
         .next()
         .filter(|line| !line.is_empty())
         .unwrap_or(b"localhost");
 
-    rustix::system::sethostname(name).map_err(Error::Hostname)?;
-    Ok(String::from_utf8_lossy(name).into_owned())
+    match rustix::system::sethostname(wanted) {
+        Ok(()) => (String::from_utf8_lossy(wanted).into_owned(), None),
+        Err(e) => (current_hostname(), Some(Error::Hostname(e))),
+    }
+}
+
+/// Whatever the machine is called right now.
+fn current_hostname() -> String {
+    let uname = rustix::system::uname();
+    let name = uname.nodename().to_string_lossy().into_owned();
+
+    if name.is_empty() {
+        "localhost".to_owned()
+    } else {
+        name
+    }
 }
