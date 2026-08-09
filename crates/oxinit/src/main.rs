@@ -28,6 +28,7 @@ mod cgroup;
 mod console;
 mod error;
 mod event;
+mod listen;
 mod mounts;
 mod notify;
 mod reap;
@@ -156,6 +157,11 @@ fn boot() -> ! {
         None
     };
 
+    // Socket units are watched from here on. Done after the initial start
+    // rather than alongside the cgroups, so a service that boot started
+    // eagerly is never activated a second time by a connection.
+    supervisor.sync_sockets(&events);
+
     run(&mut events, &signals, &mut supervisor, &mut shell)
 }
 
@@ -187,11 +193,20 @@ fn run(
                 event::Source::Timer => supervisor.on_timer(),
                 event::Source::Notify => supervisor.on_notify(),
                 event::Source::Cgroup(id) => supervisor.on_cgroup(*id),
+                event::Source::Socket(id) => supervisor.on_socket(*id),
             }));
 
             if result.is_err() {
                 eprintln!("oxinit: handler panicked; continuing");
             }
+        }
+
+        // One reconciliation per wake-up rather than an arm/disarm call inside
+        // every handler that can change a service's state. Idempotent, and it
+        // cannot be forgotten in a path added later.
+        let result = catch_unwind(AssertUnwindSafe(|| supervisor.sync_sockets(events)));
+        if result.is_err() {
+            eprintln!("oxinit: socket reconciliation panicked; continuing");
         }
     }
 }

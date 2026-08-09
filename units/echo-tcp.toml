@@ -1,0 +1,10 @@
+# A second socket unit feeding the same service, so it is handed two
+# descriptors and has to tell them apart by LISTEN_FDNAMES rather than by
+# assuming fd 3.
+[unit]
+description = "Echo socket, over TCP"
+
+[socket]
+listen  = ["127.0.0.1:7000"]
+service = "echo"
+backlog = 16

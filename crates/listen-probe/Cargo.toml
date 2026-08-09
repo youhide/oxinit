@@ -1,0 +1,15 @@
+[package]
+name = "listen-probe"
+version = "0.0.0"
+description = "Test fixture: a socket-activated service, and a client to poke it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A test fixture, not PID 1. The rules on the oxinit crate do not apply.
+#
+# Nothing in busybox both speaks LISTEN_FDS and reports what it was given, so
+# verifying descriptor passing from inside a guest needs a service that does.
+[dependencies]

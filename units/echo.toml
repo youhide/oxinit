@@ -1,0 +1,13 @@
+# Started by a connection, not by boot. Nothing wants this unit, so it is not
+# reachable from `default` and never starts on its own — which is the point of
+# socket activation.
+#
+# It serves one connection and exits, so the socket goes back to being watched
+# and the next connection starts it again.
+[unit]
+description = "Socket-activated echo service"
+
+[service]
+type    = "oneshot"
+exec    = "/bin/listen-probe --serve echo-socket"
+restart = "no"

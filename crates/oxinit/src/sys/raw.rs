@@ -111,14 +111,25 @@ pub fn read_signals(fd: &OwnedFd, out: &mut Vec<u32>) -> Result<(), Errno> {
 ///
 /// `Command::uid`/`Command::gid` would run in the wrong order relative to the
 /// first step, and would pass only the primary group to `setgroups`.
-/// The default — no cgroup and no privilege drop — still resets the signal
-/// mask, which is why even the fallback console shell goes through this.
+/// The default — no cgroup, no descriptors, no privilege drop, and no image —
+/// still resets the signal mask, which is why even the fallback console shell
+/// goes through this.
 #[derive(Default)]
 pub struct ChildSetup {
     /// An open `cgroup.procs`, write-only and `CLOEXEC`.
     pub cgroup_procs: Option<OwnedFd>,
+    /// Descriptors to place at fd 3 upward, in order.
+    ///
+    /// Already duplicated to numbers at or above the range they are moving
+    /// into, so no `dup2` here can clobber a descriptor it has not used yet —
+    /// and none of them is a no-op, which would leave `FD_CLOEXEC` set and
+    /// close the descriptor at exec.
+    pub listen_fds: Vec<OwnedFd>,
     /// Who to become. `None` leaves the child as root.
     pub identity: Option<Identity>,
+    /// What to exec. `None` leaves it to the standard library, which is what
+    /// the console shell wants.
+    pub image: Option<Image>,
 }
 
 /// Install [`ChildSetup`] as the child's `pre_exec` hook.
@@ -129,7 +140,7 @@ pub struct ChildSetup {
 /// allocation, no file opening, no name lookup. `write`, `setgroups`,
 /// `setgid`, and `setuid` are all on the POSIX list; reading a `Vec`'s pointer
 /// and length is not a call at all.
-pub fn setup_child(command: &mut Command, setup: ChildSetup) {
+pub fn setup_child(command: &mut Command, mut setup: ChildSetup) {
     // SAFETY: the contract on `pre_exec` is that the closure only calls
     // async-signal-safe functions, because it runs between fork and exec in a
     // process that inherited every lock the parent held. The closure below
@@ -150,13 +161,44 @@ pub fn setup_child(command: &mut Command, setup: ChildSetup) {
                 write_all(fd.as_raw_fd(), b"0")?;
             }
 
+            place_descriptors(&setup.listen_fds)?;
+
             if let Some(identity) = setup.identity.as_ref() {
                 drop_privilege(identity)?;
             }
 
-            Ok(())
+            match setup.image.as_mut() {
+                // Does not return unless it fails.
+                Some(image) => Err(image.exec()),
+                None => Ok(()),
+            }
         });
     }
+}
+
+/// Move the inherited listening descriptors to fd 3, 4, 5 …
+///
+/// `dup2` clears `FD_CLOEXEC` on the descriptor it creates, which is what
+/// makes them survive the exec — every other descriptor oxinit holds is
+/// `CLOEXEC` and closes.
+///
+/// Runs in the child, between fork and exec.
+fn place_descriptors(fds: &[OwnedFd]) -> io::Result<()> {
+    for (index, fd) in fds.iter().enumerate() {
+        let Ok(offset) = i32::try_from(index) else {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        };
+
+        // SAFETY: `dup2` takes two descriptor numbers and returns one. The
+        // source is owned by the caller and open. The target is `3 + index`,
+        // which the caller guarantees differs from every source — a `dup2`
+        // onto itself is a no-op that would leave FD_CLOEXEC set, and the
+        // descriptor would vanish at exec.
+        if unsafe { libc::dup2(fd.as_raw_fd(), FIRST_LISTEN_FD + offset) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Unblock every signal in the child.
@@ -257,6 +299,222 @@ fn write_all(fd: i32, mut buf: &[u8]) -> io::Result<()> {
         buf = buf.get(written..).unwrap_or(&[]);
     }
     Ok(())
+}
+
+/// The first descriptor a socket-activated service is handed. Fixed by the
+/// protocol: 0, 1 and 2 are stdio, and the listening sockets start after them.
+pub const FIRST_LISTEN_FD: i32 = 3;
+
+/// The variable whose value only the child knows.
+const LISTEN_PID: &str = "LISTEN_PID=";
+
+/// Room for any pid the kernel will hand out. `pid_max` is bounded by
+/// `PID_MAX_LIMIT`, which is well under ten digits.
+const PID_DIGITS: usize = 10;
+
+/// The child's exec image: program, argv, and environment.
+///
+/// Built entirely in the parent. That is the point of it — `LISTEN_PID` has to
+/// name the process the descriptors were passed to, and that pid does not
+/// exist until after the fork, at which point nothing may allocate. So the
+/// storage is laid out beforehand with a gap the child fills in, and the child
+/// execs this image itself rather than the one the standard library would have
+/// built.
+///
+/// It also means oxinit decides exactly what a service's environment is,
+/// rather than inheriting whatever `Command` would have assembled.
+pub struct Image {
+    /// NUL-terminated strings. `argv` and `envp` point into these, so nothing
+    /// may be pushed after they are built — but the bytes may be overwritten,
+    /// which is how `LISTEN_PID` gets its value.
+    storage: Vec<Vec<u8>>,
+    /// NULL-terminated pointer arrays, held as `usize` rather than as raw
+    /// pointers so the whole struct stays `Send + Sync` and can be moved into
+    /// the `pre_exec` closure.
+    argv: Vec<usize>,
+    envp: Vec<usize>,
+    /// Which storage entry holds `LISTEN_PID`, and where its digits start.
+    listen_pid: Option<(usize, usize)>,
+}
+
+impl Image {
+    /// Lay out the image.
+    ///
+    /// `exec` is the argv, program included. `env` is what oxinit adds on top
+    /// of its own environment; a variable named in both is oxinit's.
+    ///
+    /// `listen_pid` reserves the slot the child fills in. Set it only when the
+    /// service is actually being given descriptors — a `LISTEN_PID` with no
+    /// `LISTEN_FDS` is noise, and a service that trusted it would be reading a
+    /// descriptor table it does not own.
+    ///
+    /// `None` if any string contains a NUL, which cannot survive as a C
+    /// string, or if `exec` is empty.
+    pub fn build(exec: &[String], env: &[(String, String)], listen_pid: bool) -> Option<Self> {
+        let mut storage: Vec<Vec<u8>> = Vec::new();
+
+        for arg in exec {
+            storage.push(terminate(arg.as_bytes().to_vec())?);
+        }
+        let argc = storage.len();
+        if argc == 0 {
+            return None;
+        }
+
+        // oxinit's own environment, minus anything it is about to set and
+        // anything a service must never inherit second-hand. A stale
+        // LISTEN_FDS would have a service reading descriptors that belong to
+        // something else entirely.
+        for (key, value) in std::env::vars_os() {
+            let key = key.into_encoded_bytes();
+            if RESERVED.iter().any(|name| name.as_bytes() == key) {
+                continue;
+            }
+            if env.iter().any(|(name, _)| name.as_bytes() == key) {
+                continue;
+            }
+
+            let mut entry = key;
+            entry.push(b'=');
+            entry.extend_from_slice(&value.into_encoded_bytes());
+            storage.push(terminate(entry)?);
+        }
+
+        for (key, value) in env {
+            let mut entry = key.as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_bytes());
+            storage.push(terminate(entry)?);
+        }
+
+        let listen_pid = listen_pid.then(|| {
+            // Zeroes now, digits and a NUL later. The entry only has to be
+            // long enough; the NUL the child writes is what ends the string,
+            // so a shorter pid simply leaves unused bytes behind it.
+            let mut entry = LISTEN_PID.as_bytes().to_vec();
+            entry.resize(LISTEN_PID.len() + PID_DIGITS + 1, 0);
+            storage.push(entry);
+
+            (storage.len().saturating_sub(1), LISTEN_PID.len())
+        });
+
+        let mut argv: Vec<usize> = storage
+            .get(..argc)?
+            .iter()
+            .map(|entry| entry.as_ptr() as usize)
+            .collect();
+        argv.push(0);
+
+        let mut envp: Vec<usize> = storage
+            .get(argc..)?
+            .iter()
+            .map(|entry| entry.as_ptr() as usize)
+            .collect();
+        envp.push(0);
+
+        Some(Self {
+            storage,
+            argv,
+            envp,
+            listen_pid,
+        })
+    }
+
+    /// Replace the calling process with this image.
+    ///
+    /// Runs in the child, between fork and exec. Returns only on failure, and
+    /// the standard library reports that error to the parent through the pipe
+    /// it already set up.
+    fn exec(&mut self) -> io::Error {
+        if let Some((index, offset)) = self.listen_pid {
+            // SAFETY: `getpid` takes no arguments, touches no memory, and is
+            // on the POSIX async-signal-safe list.
+            let pid = unsafe { libc::getpid() };
+
+            if let Some(entry) = self.storage.get_mut(index) {
+                write_pid(entry, offset, pid);
+            }
+        }
+
+        let Some(program) = self.argv.first().copied() else {
+            return io::Error::from(io::ErrorKind::InvalidInput);
+        };
+
+        // SAFETY: `execve` reads a NUL-terminated path and two
+        // NULL-terminated arrays of NUL-terminated strings. Every string lives
+        // in `self.storage`, which outlives this call; both arrays were built
+        // from those same entries and end in a 0. `usize` and `*const c_char`
+        // have the same size and alignment on every target oxinit supports, so
+        // the pointer arrays are laid out as the kernel expects. On success it
+        // does not return.
+        unsafe {
+            libc::execve(
+                program as *const libc::c_char,
+                self.argv.as_ptr().cast(),
+                self.envp.as_ptr().cast(),
+            );
+        }
+
+        io::Error::last_os_error()
+    }
+}
+
+/// Variables oxinit never passes through from its own environment.
+///
+/// A service sees the values oxinit set for it, or nothing. Inheriting any of
+/// these second-hand would point it at another process's descriptors or
+/// another process's notify socket.
+const RESERVED: &[&str] = &[
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+    "NOTIFY_SOCKET",
+    "WATCHDOG_USEC",
+];
+
+/// Append the NUL that makes a byte string a C string.
+///
+/// `None` if it already contains one: the kernel would read a truncated
+/// argument, which is worse than refusing to start the unit.
+fn terminate(mut bytes: Vec<u8>) -> Option<Vec<u8>> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    bytes.push(0);
+    Some(bytes)
+}
+
+/// Write `pid` as decimal digits at `offset`, followed by a NUL.
+///
+/// Runs in the child, into a buffer allocated before the fork. Digits are
+/// produced least-significant first into a fixed array and then copied, which
+/// is the whole reason this is not `format!`.
+fn write_pid(entry: &mut [u8], offset: usize, pid: i32) {
+    let mut digits = [0u8; PID_DIGITS];
+    let mut value = pid.unsigned_abs();
+    let mut first = PID_DIGITS;
+
+    while first > 0 {
+        first -= 1;
+        if let Some(slot) = digits.get_mut(first) {
+            *slot = b'0' + (value % 10) as u8;
+        }
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    let mut at = offset;
+    for byte in digits.get(first..).unwrap_or_default() {
+        if let Some(slot) = entry.get_mut(at) {
+            *slot = *byte;
+        }
+        at = at.saturating_add(1);
+    }
+    if let Some(slot) = entry.get_mut(at) {
+        *slot = 0;
+    }
 }
 
 /// The current `errno`, read through std rather than `__errno_location`, so
