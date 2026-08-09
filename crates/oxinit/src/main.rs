@@ -26,6 +26,7 @@ compile_error!(
 
 mod cgroup;
 mod console;
+mod container;
 mod control;
 mod error;
 mod event;
@@ -90,15 +91,26 @@ fn main() -> ExitCode {
 
 /// Never returns. Not "returns on shutdown" — never.
 fn boot() -> ! {
-    for failure in mounts::mount_all() {
-        // Nothing has a console yet, so this is only visible if the kernel
-        // left stderr usable.
-        eprintln!("oxinit: {failure}");
-    }
+    // Nothing is printed from here — there is no console yet to print to.
+    // What happened is carried out and reported below, once there is.
+    let mounted = mounts::mount_all();
 
     if let Err(e) = console::attach() {
         eprintln!("oxinit: {e}");
     }
+
+    // After the mounts, because the last of the checks reads `/proc`; before
+    // anything that could want to know. Said once, here, and then only acted
+    // on at the end of a shutdown.
+    let environment = container::Environment::detect();
+    if environment.is_container() {
+        println!("oxinit: pid 1 of {environment}; a shutdown will exit rather than reboot");
+    }
+
+    // Reported after the console rather than as it happens, so that on a
+    // machine whose image had no console for the kernel to open, these lines
+    // are on the console oxinit just opened instead of nowhere.
+    report_mounts(&mounted);
 
     let (hostname, failure) = mounts::set_hostname();
     if let Some(e) = failure {
@@ -211,7 +223,35 @@ fn boot() -> ! {
         &mut supervisor,
         &mut shell,
         &mut control,
+        &environment,
     )
+}
+
+/// One line for the mounts oxinit did not have to do, one for the ones it was
+/// not allowed to do, and one per genuine failure.
+///
+/// The collapsing is the point. Under a container runtime every entry in the
+/// table is either already mounted or forbidden, and printing seven `EPERM`
+/// lines at the top of every container's log described work that was already
+/// done and offered nothing to do about it.
+fn report_mounts(mounted: &mounts::Mounts) {
+    if !mounted.inherited.is_empty() {
+        println!(
+            "oxinit: already mounted, left alone: {}",
+            mounted.inherited.join(", ")
+        );
+    }
+
+    if !mounted.refused.is_empty() {
+        eprintln!(
+            "oxinit: not permitted to mount {}; continuing without them",
+            mounted.refused.join(", ")
+        );
+    }
+
+    for failure in &mounted.failures {
+        eprintln!("oxinit: {failure}");
+    }
 }
 
 /// The event loop.
@@ -221,6 +261,7 @@ fn run(
     supervisor: &mut supervisor::Supervisor,
     shell: &mut Option<Child>,
     control: &mut Option<control::Control>,
+    environment: &container::Environment,
 ) -> ! {
     let mut sources = Vec::new();
     let mut pending = Vec::new();
@@ -265,11 +306,11 @@ fn run(
         // stops, its cgroup empties, and this is where that turns out to have
         // been the last one.
         if let Some(action) = supervisor.settled() {
-            if let Err(e) = shutdown::finalize(action) {
-                // The kernel refused. In a container that is expected —
-                // rebooting is not oxinit's to do there, and exiting instead
-                // is M6. Anywhere else PID 1 exiting is a kernel panic, so
-                // the only option is to stay up and say so.
+            if let Err(e) = shutdown::finalize(action, environment) {
+                // The kernel refused, and this is a machine — a container
+                // exits inside `finalize` and never reaches here. PID 1
+                // exiting is a kernel panic, so the only option left is to
+                // stay up and say so.
                 eprintln!("oxinit: {action}: {e}");
                 eprintln!("oxinit: cannot go down; staying up with everything stopped");
                 fallback(Some(signals));

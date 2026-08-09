@@ -4,6 +4,11 @@ after       = ["banner"]
 
 [service]
 exec = "/bin/sh"
+# Its own session, with the console as the session's controlling terminal.
+# Without it busybox opens with "can't access tty; job control turned off",
+# Ctrl-C reaches nothing, and every program started from this shell inherits
+# the same. Exactly one unit on a machine should declare it.
+tty  = true
 # An interactive shell ignores SIGTERM, so the polite half of the stop can
 # never work on it and the escalation to cgroup.kill is what actually ends it.
 # Short, because waiting the default 30s on a debug shell at every shutdown is

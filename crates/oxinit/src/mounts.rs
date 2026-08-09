@@ -64,18 +64,53 @@ const SPECS: &[Spec] = &[
     },
 ];
 
+/// What became of the mounts.
+#[derive(Default)]
+pub struct Mounts {
+    /// Targets something else had already mounted, and oxinit left alone.
+    pub inherited: Vec<&'static str>,
+    /// Targets oxinit was not allowed to mount.
+    pub refused: Vec<&'static str>,
+    /// Everything that went wrong for a reason an operator can act on.
+    pub failures: Vec<Error>,
+}
+
 /// Mount everything, in order.
 ///
-/// Returns the failures rather than stopping at the first one. A machine with
-/// `/proc` but no `/sys` is worth more than one that gave up.
-pub fn mount_all() -> Vec<Error> {
-    let mut failures = Vec::new();
+/// Nothing here stops at the first problem. A machine with `/proc` but no
+/// `/sys` is worth more than one that gave up.
+///
+/// The two categories that are not failures are separated out because they are
+/// not actionable and there are a lot of them. A container runtime mounts these
+/// filesystems itself before it execs PID 1 and then denies the capability to
+/// mount anything, so oxinit used to open every container log with seven
+/// `EPERM` lines describing work that was already done. `inherited` is that
+/// work; `refused` is the rest, collapsed into one line by the caller, because
+/// seven copies of "not permitted" say nothing the first one did not.
+pub fn mount_all() -> Mounts {
+    let mut mounts = Mounts::default();
+
     for spec in SPECS {
-        if let Err(e) = mount_one(spec) {
-            failures.push(e);
+        // Asked before mounting rather than inferred from the error, because
+        // the error does not distinguish them: mounting over an existing mount
+        // is `EBUSY` where oxinit is allowed to mount and `EPERM` where it is
+        // not, and `EPERM` is also what a genuinely missing filesystem returns.
+        if is_mounted(spec.target) {
+            mounts.inherited.push(spec.target);
+            continue;
+        }
+
+        match mount_one(spec) {
+            Ok(()) => {}
+            Err(Error::Mount {
+                target,
+                source: Errno::PERM,
+            }) => mounts.refused.push(target),
+            Err(e) => mounts.failures.push(e),
         }
     }
-    failures
+
+    mounts
 }
 
 fn mount_one(spec: &Spec) -> Result<()> {
@@ -92,13 +127,35 @@ fn mount_one(spec: &Spec) -> Result<()> {
 
     match mount(spec.fstype, spec.target, spec.fstype, spec.flags, spec.data) {
         Ok(()) => Ok(()),
-        // Already mounted. The initramfs or a previous run got here first.
+        // Already mounted, and `is_mounted` did not see it. Reachable for a
+        // bind mount of the same filesystem, which the device comparison below
+        // cannot detect.
         Err(Errno::BUSY) => Ok(()),
         Err(source) => Err(Error::Mount {
             target: spec.target,
             source,
         }),
     }
+}
+
+/// Whether something is mounted at `target`.
+///
+/// A directory and its parent are on the same device unless a filesystem is
+/// mounted between them, so two `stat` calls answer this — with no `/proc`,
+/// which matters because `/proc` is the first thing on the list and cannot be
+/// used to decide whether to mount itself.
+///
+/// A target that does not exist yet is not mounted, which is the same answer
+/// and the same next step.
+fn is_mounted(target: &'static str) -> bool {
+    let (Ok(here), Ok(parent)) = (
+        rustix::fs::stat(target),
+        rustix::fs::stat(format!("{target}/..")),
+    ) else {
+        return false;
+    };
+
+    here.st_dev != parent.st_dev
 }
 
 /// Set the hostname from `/etc/hostname`, and report the name that is

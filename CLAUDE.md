@@ -58,7 +58,10 @@ PID 1 is a kernel panic.
 **Wrap event-loop handlers in `catch_unwind`.** A panic that escapes a handler
 must unwind to the loop boundary, get logged, and let the loop continue.
 
-**Never call `exit()`.** If the loop cannot continue, spawn `/bin/sh` on
+**Never call `exit()`,** with one exception that is not an error path: the end
+of an ordered shutdown in a container, in `shutdown::exit`, where the container
+only exists for as long as its PID 1 does. Nowhere else, and never on a
+failure. If the loop cannot continue — in a container too — spawn `/bin/sh` on
 `/dev/console` and keep reaping.
 
 **No async.** No `tokio`, no `async-std`, no `futures`, no `async fn`. One

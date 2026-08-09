@@ -161,7 +161,12 @@ const EXPECTED: &[(&str, &str)] = &[
 
 /// Lines that must not appear. A boot that logs one of these has failed even
 /// if everything else is present.
-const FORBIDDEN: &[&str] = &["panicked", "Kernel panic"];
+///
+/// "can't access tty" is busybox reporting that it has no controlling
+/// terminal, which is what `tty = true` on the console unit exists to prevent.
+/// It is asserted as an absence because there is no line to assert on when it
+/// works — a shell with job control simply does not mention it.
+const FORBIDDEN: &[&str] = &["panicked", "Kernel panic", "can't access tty"];
 
 /// Hard limit on the whole boot. A test that hangs has to fail, not block.
 const TEST_TIMEOUT: u32 = 90;

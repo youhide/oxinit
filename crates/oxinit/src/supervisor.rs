@@ -1096,6 +1096,11 @@ fn spawn(
             listen_fds,
             identity,
             image: Some(image),
+            // Declared, never inferred. Every service on a machine that boots
+            // to a console inherits a tty on stdin, and giving each one a
+            // session would have them take the terminal from one another, one
+            // start at a time.
+            session: service.tty,
         },
     );
 

@@ -19,7 +19,18 @@ pub fn spawn() -> Result<Child> {
     // that inherited PID 1's full block mask could not be interrupted, could
     // not be suspended, and would pass that mask on to everything an operator
     // ran from it.
-    setup_child(&mut command, ChildSetup::default());
+    //
+    // And for the controlling terminal, when there is a terminal to control.
+    // Asked here rather than in the child because `isatty` is a `tcgetattr`,
+    // which is not something to call between fork and exec — and because the
+    // answer is the same for every shell oxinit will ever spawn.
+    setup_child(
+        &mut command,
+        ChildSetup {
+            session: rustix::termios::isatty(rustix::stdio::stdin()),
+            ..ChildSetup::default()
+        },
+    );
 
     command.spawn().map_err(|source| Error::Spawn {
         path: SHELL,

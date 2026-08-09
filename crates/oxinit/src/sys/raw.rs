@@ -127,6 +127,10 @@ pub struct ChildSetup {
     pub listen_fds: Vec<OwnedFd>,
     /// Who to become. `None` leaves the child as root.
     pub identity: Option<Identity>,
+    /// Start a session and claim stdin as its controlling terminal.
+    ///
+    /// For the console shell and nothing else. See [`start_session`].
+    pub session: bool,
     /// What to exec. `None` leaves it to the standard library, which is what
     /// the console shell wants.
     pub image: Option<Image>,
@@ -153,6 +157,13 @@ pub fn setup_child(command: &mut Command, mut setup: ChildSetup) {
             // First, and unconditionally. Everything below is optional; this
             // is not.
             reset_signal_mask()?;
+
+            if setup.session {
+                // Deliberately not `?`. A shell without a controlling terminal
+                // is a shell with no job control, which is a nuisance; a shell
+                // that failed to start is a machine with no way in.
+                let _ = start_session();
+            }
 
             if let Some(fd) = setup.cgroup_procs.as_ref() {
                 // The kernel reads `0` as "the process doing the writing",
@@ -231,6 +242,50 @@ fn reset_signal_mask() -> io::Result<()> {
     // optional old-mask out-param, and null means "do not report it".
     let rc = unsafe { libc::sigprocmask(libc::SIG_SETMASK, set.as_ptr(), ptr::null_mut()) };
     if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+/// Become a session leader, and claim stdin as the session's controlling
+/// terminal.
+///
+/// Without this the console shell has no controlling terminal, and busybox
+/// says so on every boot: "can't access tty; job control turned off". Ctrl-C
+/// reaches nothing, `fg` and `bg` do not exist, and every program the operator
+/// runs from that shell inherits the same. It is the oldest known gap in this
+/// project — noted in M0, deferred twice — and it is two syscalls.
+///
+/// `setsid` first, because `TIOCSCTTY` is only legal for a session leader that
+/// does not already have a controlling terminal, and the second condition is
+/// what `setsid` guarantees. It also detaches the shell from PID 1's session,
+/// which is the point: the terminal's signals should reach the shell's process
+/// group, not oxinit's.
+///
+/// Whether stdin is a terminal at all is decided in the parent — see
+/// [`crate::shell`]. Here it is assumed.
+///
+/// Runs in the child, between fork and exec. `setsid` is on the POSIX
+/// async-signal-safe list. `ioctl` is not on it, and is used anyway: on both
+/// musl and glibc it is a thin wrapper around the syscall that allocates
+/// nothing and takes no lock, and the list is a statement about what the C
+/// library does, not about the kernel.
+fn start_session() -> io::Result<()> {
+    // SAFETY: `setsid` takes no arguments and reads no memory. It fails only
+    // if the caller is already a process group leader, which a freshly forked
+    // child of PID 1 is not — its pgid is inherited and is not its own pid.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `TIOCSCTTY` reads its argument as an integer, not as a pointer,
+    // so no memory is dereferenced. `0` means "do not steal this terminal from
+    // another session", which is the conservative half of the two behaviours
+    // and the only one that is anyone's to ask for. Descriptor 0 is stdin,
+    // open and a terminal by the caller's precondition; if it is neither, the
+    // call fails with an errno and changes nothing.
+    if unsafe { libc::ioctl(0, libc::TIOCSCTTY as _, 0) } < 0 {
         return Err(io::Error::last_os_error());
     }
 
