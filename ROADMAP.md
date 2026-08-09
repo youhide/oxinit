@@ -710,7 +710,49 @@ Verified under QEMU, both architectures, and against a real Alpine userspace:
 29 checks on each architecture, 31 against the distribution image, 146 host
 tests.
 
-## Beyond M11
+## M12 — Continuous verification
+
+**Done.**
+
+Every milestone above ends with a paragraph beginning "Verified". Until this
+one, each of those was a claim about something someone had run once, on their
+own machine, and nothing re-ran it afterwards.
+
+- [x] `cargo xtask fetch`: download the kernel and the static busybox an
+      architecture needs, so the setup is a command rather than a paragraph
+      about where Alpine keeps things.
+- [x] A workflow that runs `fmt`, `clippy` against both musl targets, the host
+      tests, both boot suites, the container suite, and the distribution
+      suite.
+- [x] Serial logs kept when a boot fails.
+
+Split by cost. The lint and test job is seconds and gates the rest; the four
+boot suites run in parallel with one another. aarch64 has no hardware
+acceleration on an x86_64 runner, so its boot goes through QEMU's JIT and is
+the slowest thing in the set by a wide margin — which is an argument for
+running it, not against: it is the configuration least likely to be exercised
+by hand.
+
+A boot suite that fails tells you which line was missing from a log you do not
+have. So the log is uploaded, and a failure is readable without reproducing
+it.
+
+Verified by the thing itself, which is the only way this milestone can be:
+
+| Job                     | Result  | Time  |
+|-------------------------|---------|-------|
+| fmt, clippy, host tests | success | 0m44s |
+| boot (x86_64)           | success | 1m33s |
+| boot (aarch64)          | success | 1m42s |
+| container               | success | 1m18s |
+| a real userspace        | success | 1m31s |
+
+The whole set is under two minutes wall-clock after the gate, which was the
+surprise: an emulated ARM64 boot on an x86_64 runner costs nine seconds more
+than a native one. The 300-second budget picked in M9 turns out to be an order
+of magnitude of headroom rather than a tight fit.
+
+## Beyond M12
 
 Not planned, not designed, listed only so the questions have an answer:
 

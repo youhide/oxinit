@@ -24,12 +24,17 @@ MSRV is stable minus two releases. No nightly features are used.
 **Tools.** `qemu-system-x86_64`, `qemu-system-aarch64` and `cpio`. Docker or
 podman as well, if you are running `cargo xtask container`.
 
-**Boot artifacts.** A kernel and a static busybox per architecture, under
-`target/`, where `xtask` looks for them by name — `vmlinuz-x86_64`,
-`vmlinuz-aarch64`, `busybox-x86_64`, `busybox-aarch64`. Alpine publishes both:
-a kernel under `releases/<arch>/netboot/vmlinuz-lts` and a `busybox-static`
-package under `main/<arch>/`. `--kernel` and `--shell` override, and so do
-`$OXINIT_KERNEL_<ARCH>` and `$OXINIT_SHELL_<ARCH>`.
+**Boot artifacts.** One command per architecture:
+
+```bash
+cargo xtask fetch --arch x86_64
+cargo xtask fetch --arch aarch64
+```
+
+That downloads a kernel and a statically linked busybox from Alpine into
+`target/`, where `xtask` looks for them by name. `--kernel` and `--shell`
+override, and so do `$OXINIT_KERNEL_<ARCH>` and `$OXINIT_SHELL_<ARCH>`, if you
+would rather use a kernel you already have.
 
 ```bash
 # Debian/Ubuntu
