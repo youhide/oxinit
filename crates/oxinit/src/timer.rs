@@ -21,6 +21,9 @@ pub enum Alarm {
     Restart { unit: String },
     /// Time to check whether a unit has missed its watchdog deadline.
     WatchdogCheck { unit: String },
+    /// A unit's `stop-sec` has elapsed since `SIGTERM`. Whatever is left in
+    /// its cgroup gets killed.
+    StopTimeout { unit: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

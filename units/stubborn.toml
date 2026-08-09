@@ -1,0 +1,12 @@
+# Hangs like `hangs`, but also ignores SIGTERM, so the polite half of the stop
+# path cannot work. Once stop-sec elapses oxinit must write cgroup.kill, and
+# the unit must end up Failed rather than stuck in Deactivating forever.
+[unit]
+description = "Refuses to stop politely"
+
+[service]
+type         = "notify"
+exec         = "/bin/notify-probe --hang-after 2 --ignore-term"
+watchdog-sec = "3s"
+restart      = "no"
+stop-sec     = "1s"

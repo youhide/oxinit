@@ -52,6 +52,16 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+
+    #[error("open {path}: {source}")]
+    Open {
+        path: String,
+        #[source]
+        source: rustix::io::Errno,
+    },
+
+    #[error("cgroup: {0}")]
+    Cgroup(#[source] oxinit_cgroup::CgroupError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

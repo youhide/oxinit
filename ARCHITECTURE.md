@@ -141,7 +141,15 @@ forgets to handle is silently ignored — the failure mode is an unresponsive
 init, not a dead one.
 
 Children get the mask reset between `fork` and `exec`. An inherited full block
-mask breaks nearly every daemon.
+mask breaks nearly every daemon, and it breaks the service manager too: a
+service that starts with `SIGTERM` blocked cannot be stopped, only killed.
+
+oxinit does this reset itself, in its own `pre_exec` hook, rather than leaving
+it to the standard library. `Command` makes no documented promise about the
+child's signal mask; the implementation that happens to clear it does so
+before `pre_exec` runs, where nothing oxinit writes can observe whether it
+happened. A requirement this load-bearing does not rest on an implementation
+detail.
 
 ## Reaping
 
@@ -337,6 +345,30 @@ Backoff is per-unit and resets after the unit has been `Active` for longer than
 the current backoff interval. Without the reset, a service that crashes once a
 day eventually takes hours to come back.
 
+**Why a unit is stopping is part of its state.** Transition (5) and transition
+(9) are both reached by the cgroup emptying, and which one applies depends on
+what asked for the stop:
+
+| Cause     | On the cgroup emptying                                        |
+|-----------|---------------------------------------------------------------|
+| Requested | `Inactive`. An explicit stop overrides the `restart` policy.   |
+| Watchdog  | The `restart` policy applies, exactly as it would to a crash.  |
+
+That asymmetry is the point of a watchdog. It exists to turn a hang — which
+nothing else detects — into a failure the restart policy can act on, so it
+must not take the same path as `oxctl stop`.
+
+Either way, a unit that had to be killed with `cgroup.kill` ends `Failed`
+rather than `Inactive`, even when the stop was requested. It did not stop when
+it was asked to, and that is worth reporting.
+
+A `forking` service reaches `Active` with no process oxinit forked left to
+watch, so from that point its cgroup is the only thing that knows whether it
+is running. When that cgroup empties, the unit is gone — reported as an
+abnormal end, because that is all that can honestly be said: the process that
+exited was never a child of oxinit's, and there is no wait status anywhere to
+read.
+
 ## cgroup v2
 
 Every service gets a cgroup. This is how oxinit tracks processes, and it is
@@ -348,9 +380,51 @@ Hierarchy:
 /sys/fs/cgroup/oxinit.slice/<name>.service/
 ```
 
+**Delegation.** A controller is only usable in a cgroup if the parent enabled
+it in `cgroup.subtree_control`, so `+memory +pids` is written twice on the way
+down: once at the root, once on `oxinit.slice`. Only controllers the kernel
+actually reports in `cgroup.controllers` are enabled — a kernel built without
+the memory controller still boots, and the units that asked for `memory-max`
+are the only thing that fails.
+
+The root write is legal because the root cgroup is the one cgroup exempt from
+the "no internal processes" rule, and PID 1 lives there. The slice write is
+legal because the slice holds only child cgroups and never a process.
+
 **Placement.** The pid is written to `cgroup.procs` between `fork` and `exec`,
 by the child, before it becomes the service binary. Writing it after `exec`
 races with the service forking its own children.
+
+The value written is `0`, which the kernel reads as "the process doing the
+writing". It is the only value that cannot already be stale by the time the
+kernel parses it.
+
+**What the child does between fork and exec.** Three things, in this order,
+and the order is the design:
+
+1. Reset the signal mask. Unconditional; see [Signals](#signals).
+2. Write `cgroup.procs`.
+3. `setgroups`, `setgid`, `setuid`.
+
+Step 2 has to come before step 3, because writing `cgroup.procs` needs exactly
+the privilege step 3 drops. Within step 3, `setuid` last for the same reason —
+reversing it drops the privilege the group calls need, and does so silently.
+
+This is also why `Command::uid`/`Command::gid` are not used: they run before
+`pre_exec`, which is the wrong side of step 2, and they pass only the primary
+group to `setgroups`.
+
+Everything the hook needs is resolved in the parent, before the fork. The
+username is looked up against `/etc/passwd` and `/etc/group` there, and the
+`cgroup.procs` descriptor is opened there, because the hook runs in a freshly
+forked process where only async-signal-safe calls are legal — no allocation,
+no opening files, no name lookup. That also means a unit naming a user who
+does not exist fails with an error against that unit, rather than failing
+somewhere unreportable after the fork.
+
+The lookup parses `/etc/passwd` directly rather than calling `getpwnam`, which
+resolves through NSS: `dlopen`, arbitrary third-party code, and a lookup that
+can block on a network, none of which belongs in PID 1.
 
 **Limits.** `[resources]` maps directly onto cgroup files:
 
@@ -359,7 +433,14 @@ races with the service forking its own children.
 | `memory-max` | `memory.max` |
 | `tasks-max`  | `pids.max`   |
 
-Absent keys are left at the kernel default (`max`).
+An absent key is left alone rather than written as `max`, so a limit an
+operator set out of band is not silently reset on every restart of a unit that
+declares no limit of its own.
+
+A declared limit that cannot be applied fails the unit. It is not a degraded
+mode: the unit asked to be capped, and running it uncapped is not a smaller
+version of that. This is the same stance the parser takes when it refuses a
+typo in `[resources]` rather than reading it as "no limit".
 
 **Accounting.** `memory.current` and `pids.current` are read on demand for
 `oxctl status`. They are not polled.
@@ -369,15 +450,33 @@ process remains in the cgroup and `0` when the last one exits. The file
 generates an `EPOLLPRI` event when the value changes, so oxinit registers it in
 epoll and learns that a service is fully gone without polling.
 
+`EPOLLPRI` and not `EPOLLIN`: the file is always readable, so `EPOLLIN` on it
+would spin the loop at full speed. And the read that follows the notification
+has to go through the *same descriptor* that was registered — kernfs clears
+the condition per open file, so reading a freshly opened one would leave
+`EPOLLPRI` asserted on the registered one forever. Every service cgroup is
+therefore created before anything starts, and its `cgroup.events` descriptor
+is opened once, registered once, and held for the life of the process. A
+restart reuses it rather than churning the hierarchy and the registration.
+
 This is what makes `type = "forking"` tractable. The daemon forks, the parent
 exits, and the child is reparented to PID 1 with no relationship oxinit could
 have tracked by pid. The cgroup still contains it, and `populated` still reads
 `1`. When `populated` flips to `0`, the service is actually gone.
 
-**Killing.** On stop, after `SIGTERM` and the stop timeout, oxinit writes to
-`cgroup.kill` (Linux 5.14+). The kernel kills every process in the cgroup
-atomically. The alternative — reading `cgroup.procs` and signalling each pid —
-races against a process that forks while the list is being walked.
+**Killing.** A stop is `SIGTERM` to every process in the cgroup, then
+`cgroup.kill` once `stop-sec` elapses.
+
+The polite half does read `cgroup.procs` and signal each pid, and that read is
+racy — a process may fork between the read and the signal. That is tolerable
+for `SIGTERM`, where the point is to ask. It is not tolerable for the kill,
+which is exactly why the escalation is `cgroup.kill` (Linux 5.14+) rather than
+more of the same: the kernel kills every process in the cgroup atomically,
+with nothing to race.
+
+A unit is `Deactivating` until its cgroup empties — not until its main process
+exits, because a service that forked children is not stopped while they are
+still running.
 
 ## IPC
 
@@ -395,8 +494,6 @@ permissions. Access to the socket is full control of the machine.
 
 ## Workspace layout
 
-Not yet created. This is the intended shape:
-
 ```
 oxinit/
 ├─ Cargo.toml            # workspace
@@ -407,17 +504,32 @@ oxinit/
 │  ├─ oxinit-graph/      # dependency resolution
 │  ├─ oxinit-service/    # service state machine, restart policy
 │  ├─ oxinit-cgroup/     # cgroup v2
+│  ├─ oxinit-user/       # /etc/passwd and /etc/group
 │  ├─ oxinit-ipc/        # control protocol types
+│  ├─ notify-probe/      # test fixture: a service that speaks sd_notify
 │  └─ xtask/             # build and boot automation
 ├─ docs/
 └─ tests/
 ```
 
-`oxinit-unit`, `oxinit-graph`, and `oxinit-service` have no Linux dependencies
-and are testable on any host. That is deliberate: the parser, the graph, and the
-restart policy are where the logic errors are, and they should not require a VM
-to exercise. The `oxinit` crate refuses to compile off Linux, so anything placed
-in it is unreachable from a host test suite.
+`oxctl` and `oxinit-ipc` arrive in M5. Everything else exists.
+
+Every library crate is testable on any host, and that is the point of the
+split. The `oxinit` crate refuses to compile off Linux, so anything placed in
+it is unreachable from a host test suite — which means anything that can be
+tested without a kernel should not be in it.
+
+- `oxinit-unit`, `oxinit-graph`, `oxinit-service` have no Linux dependencies at
+  all. The parser, the graph, and the restart policy are where the logic errors
+  are.
+- `oxinit-cgroup` is `std::fs` and nothing more, because a cgroup is a
+  directory of small text files. The layout, every value written to a limit
+  file, and every value parsed back out are exercised against a temporary
+  directory. What genuinely needs a kernel — the `EPOLLPRI` registration, the
+  `pre_exec` write — is what stayed behind.
+- `oxinit-user` is text parsing. Getting a uid wrong is a privilege bug, so the
+  parsing is separated from the `setuid` that consumes it and tested on its
+  own.
 
 ## Development loop
 
@@ -447,8 +559,9 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
 
 ## Testing
 
-- **Unit tests** in `oxinit-unit` and `oxinit-graph`, run on the host. Parser
-  round-trips, invalid-input rejection, cycle detection, ordering correctness.
+- **Unit tests** in every library crate, run on the host. Parser round-trips,
+  invalid-input rejection, cycle detection, ordering correctness, restart and
+  stop policy, cgroup layout and file formats, user resolution.
 - **Integration tests** boot QEMU and assert against serial output.
   `cargo xtask test-boot` builds the image, boots it with a timeout, captures
   the serial log, and matches expected lines. A test that hangs fails on the

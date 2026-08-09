@@ -145,6 +145,8 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
         install(&probe, &staging.join("bin/notify-probe"))?;
     }
 
+    install_passwd(&staging)?;
+
     // Units, if any. `/etc` rather than `/usr/lib`, since a hand-assembled
     // test image is the operator's, not a package's.
     let units_src = root().join("units");
@@ -188,7 +190,7 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
 /// not exist and the shell can only run its own builtins.
 const APPLETS: &[&str] = &[
     "cat", "ls", "ps", "sleep", "mount", "umount", "hostname", "grep", "poweroff", "reboot",
-    "dmesg", "kill", "mkdir", "echo", "true", "false", "date",
+    "dmesg", "kill", "mkdir", "echo", "true", "false", "date", "id",
 ];
 
 /// Whether to treat this binary as busybox, by filename.
@@ -200,6 +202,33 @@ fn is_busybox(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("busybox"))
+}
+
+/// A user database, so a unit can declare `user` and mean something.
+///
+/// A cpio initramfs has no `/etc` unless something puts one there, and
+/// `nobody` is the account the test units drop to. `nobody` is a member of
+/// `oxinit` as well as its own primary group, which is what makes the
+/// supplementary-group half of the privilege drop visible in `id` output.
+fn install_passwd(staging: &Path) -> Result<(), String> {
+    const PASSWD: &str = "\
+root:x:0:0:root:/root:/bin/sh
+nobody:x:65534:65534:nobody:/:/bin/false
+";
+
+    const GROUP: &str = "\
+root:x:0:
+oxinit:x:100:nobody
+nogroup:x:65534:
+";
+
+    let etc = staging.join("etc");
+    fs::create_dir_all(&etc).map_err(|e| format!("create {}: {e}", etc.display()))?;
+
+    fs::write(etc.join("passwd"), PASSWD).map_err(|e| format!("write passwd: {e}"))?;
+    fs::write(etc.join("group"), GROUP).map_err(|e| format!("write group: {e}"))?;
+
+    Ok(())
 }
 
 /// Install busybox under its own name plus a symlink per applet.

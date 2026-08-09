@@ -7,3 +7,6 @@ type         = "notify"
 exec         = "/bin/notify-probe --hang-after 2"
 watchdog-sec = "3s"
 restart      = "no"
+# The watchdog kill goes through the ordinary stop path: SIGTERM to the whole
+# cgroup, then cgroup.kill once this elapses. Short so a boot shows both.
+stop-sec     = "1s"

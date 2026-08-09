@@ -1,0 +1,10 @@
+# The initial process exits and leaves the real work behind, reparented to
+# PID 1 with no relationship oxinit could have tracked by pid. Only the cgroup
+# still knows the service is running, which is what `forking` readiness is.
+[unit]
+description = "Forks and leaves the work behind"
+
+[service]
+type    = "forking"
+exec    = '/bin/sh -c "/bin/sleep 600 &"'
+restart = "no"

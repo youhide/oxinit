@@ -12,8 +12,10 @@ publish.workspace = true
 # Syscalls go through rustix. libc is here only for signalfd and sigprocmask,
 # which rustix does not cover, and is used only from `sys::raw`.
 libc.workspace = true
+oxinit-cgroup = { path = "../oxinit-cgroup" }
 oxinit-graph = { path = "../oxinit-graph" }
 oxinit-service = { path = "../oxinit-service" }
 oxinit-unit = { path = "../oxinit-unit" }
+oxinit-user = { path = "../oxinit-user" }
 rustix = { workspace = true, features = ["event", "fs", "mount", "net", "process", "stdio", "system", "time"] }
 thiserror.workspace = true
