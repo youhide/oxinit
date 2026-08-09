@@ -220,19 +220,70 @@ Nothing needs it yet.
 
 **Next.**
 
-- [ ] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
+- [x] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
       `cgroup.kill`.
-- [ ] Signal handling: `SIGTERM`, `SIGINT`, `SIGUSR1`, `SIGUSR2`, `SIGPWR`
+- [x] Signal handling: `SIGTERM`, `SIGINT`, `SIGUSR1`, `SIGUSR2`, `SIGPWR`
       mapped to explicit actions. PID 1 has no default dispositions, so an
       unhandled signal does nothing.
-- [ ] Final `sync`, remount read-only, `reboot(2)` with the right command.
+- [x] Final `sync`, remount read-only, `reboot(2)` with the right command.
 - [ ] Control socket: `SOCK_SEQPACKET` at `/run/oxinit/control.sock`, mode
       `0600`.
 - [ ] `oxinit-ipc` request and response types, JSON on the wire.
 - [ ] `oxctl`: `start`, `stop`, `restart`, `status`, `list`, `reload`.
 - [ ] `cargo xtask test-boot` — boot with a timeout, assert on serial output.
+- [x] `init.scope`: move PID 1 into a leaf cgroup before delegating
+      controllers.
+- [x] Read the hostname back when `sethostname` is refused, rather than
+      assuming `localhost`.
 
-## Beyond M5
+The last two came out of the container investigation below, and neither is
+container-specific.
+
+`init.scope` is the more interesting one. Delegating controllers today works
+only because the root cgroup is exempt from the "no internal processes" rule
+and PID 1 lives there. Moving PID 1 into a leaf first removes that dependency,
+stops accounting PID 1's own memory at the root, and is what makes the cgroup
+path work anywhere the root is not really the root.
+
+## M6 — Containers
+
+**Not started.**
+
+oxinit is a plausible PID 1 for a container — the job there is reaping
+orphans, forwarding signals, and supervising more than one process, which is
+most of what M0 through M4 already do. What it needs is to stop assuming it
+booted a machine.
+
+- [ ] Detect that the machine is a container, and say so once.
+- [ ] Do not take over `/dev/console` when the runtime already gave PID 1 a
+      usable stdio.
+- [ ] Tolerate the pseudo-filesystems the runtime has already mounted, rather
+      than reporting seven failures nothing can act on.
+- [ ] `exit()` instead of `reboot(2)` where rebooting is not oxinit's to do —
+      and only there, since exiting is a kernel panic anywhere else.
+- [ ] `cargo xtask container` — build an image, run it, and assert on its
+      output, the way `test-boot` does for QEMU.
+- [ ] README and docs: running oxinit as PID 1 under Docker and Kubernetes,
+      including what `[resources]` means when the runtime already caps the
+      container.
+
+Measured in a container before any of this was written, against Docker with
+cgroup v2. What already worked: unit loading and resolution, `sd_notify` and
+the watchdog, the privilege drop, socket activation over both unix and TCP,
+and orphan reaping — no zombies after a double fork, which is the usual reason
+to reach for `tini`.
+
+What did not, and why each is listed above:
+
+| Symptom                                            | Cause                                              |
+|----------------------------------------------------|----------------------------------------------------|
+| `docker stop` always ends in `SIGKILL`, exit 137    | `SIGTERM` and `SIGINT` do nothing yet. M5.         |
+| No output at all from a privileged container        | `/dev/console` exists there, so oxinit redirects stdio onto it and the runtime's pipes see nothing. |
+| `oxinit.slice` is never created                     | `cgroup.subtree_control` returns `EBUSY`: inside a cgroup namespace the mount root is the container's own cgroup, not the real root, so the internal-process rule applies and PID 1 is in it. M5's `init.scope`. |
+| `%H` expands to `localhost`                         | `sethostname` is refused and the fallback assumes rather than reads. M5. |
+| Seven `mount: EPERM` lines before anything else     | The runtime mounted them already.                   |
+
+## Beyond M6
 
 Not planned, not designed, listed only so the questions have an answer:
 

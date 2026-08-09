@@ -37,8 +37,10 @@ pub struct Cgroups {
 
 impl Cgroups {
     pub fn open(root: &str) -> std::result::Result<Self, CgroupError> {
+        let init = rustix::process::getpid().as_raw_nonzero().get() as u32;
+
         Ok(Self {
-            hierarchy: Some(Hierarchy::new(root)?),
+            hierarchy: Some(Hierarchy::new(root, init)?),
             handles: Vec::new(),
         })
     }

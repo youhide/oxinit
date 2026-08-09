@@ -4,3 +4,8 @@ after       = ["banner"]
 
 [service]
 exec = "/bin/sh"
+# An interactive shell ignores SIGTERM, so the polite half of the stop can
+# never work on it and the escalation to cgroup.kill is what actually ends it.
+# Short, because waiting the default 30s on a debug shell at every shutdown is
+# the difference between a usable test image and an annoying one.
+stop-sec = "2s"

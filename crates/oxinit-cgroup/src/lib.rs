@@ -38,6 +38,17 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// cgroup it did not create.
 pub const SLICE: &str = "oxinit.slice";
 
+/// Where PID 1 puts itself, so that the cgroup it started in holds no
+/// processes.
+///
+/// A cgroup may not both contain processes and delegate controllers to its
+/// children. The root cgroup is the one exception, which is the only reason
+/// delegation worked while PID 1 sat in it — and it stops being true the
+/// moment the mount root is not really the root, as inside a cgroup
+/// namespace. Moving out first removes the dependency on that exemption, and
+/// stops PID 1's own memory being accounted against the root.
+pub const INIT_SCOPE: &str = "init.scope";
+
 /// Controllers the service cgroups need. `memory` backs `memory-max` and
 /// `memory.current`; `pids` backs `tasks-max` and `pids.current`.
 ///
@@ -85,9 +96,12 @@ pub struct Hierarchy {
 }
 
 impl Hierarchy {
-    /// `root` is the cgroup2 mount point. Parameterised rather than hardcoded
-    /// so the tests can point it at a temporary directory.
-    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+    /// `root` is the cgroup2 mount point, `init_pid` the process to move into
+    /// [`INIT_SCOPE`] before delegating anything.
+    ///
+    /// Both are parameters rather than constants so the tests can point this
+    /// at a temporary directory and check what was written where.
+    pub fn new(root: impl AsRef<Path>, init_pid: u32) -> Result<Self> {
         let root = root.as_ref();
 
         // `cgroup.controllers` exists in every cgroup v2 directory and in no
@@ -106,8 +120,16 @@ impl Hierarchy {
             .filter(|c| available.contains(c))
             .collect();
 
-        // The root cgroup is the one cgroup exempt from the "no internal
-        // processes" rule, so this is allowed even though PID 1 lives here.
+        // Out of the way first: a cgroup holding processes cannot delegate
+        // controllers to its children.
+        //
+        // Best-effort, and deliberately not fatal. On a real root the
+        // exemption still applies, so a failure here costs nothing but PID 1's
+        // memory being accounted one level up. Where it does matter, the
+        // `enable` below fails with EBUSY and reports the situation in the
+        // terms that actually explain it.
+        let _ = park_init(root, init_pid);
+
         enable(root, &wanted)?;
 
         let slice = root.join(SLICE);
@@ -289,6 +311,16 @@ pub fn parse_populated(text: &str) -> Option<bool> {
         .map(|(_, value)| value.trim() != "0")
 }
 
+/// Move `pid` into [`INIT_SCOPE`], so the cgroup it was in holds no processes.
+///
+/// Its own pid rather than `0`: this runs in the parent, long before any fork,
+/// and naming the process explicitly is what makes it testable.
+fn park_init(root: &Path, pid: u32) -> Result<()> {
+    let scope = root.join(INIT_SCOPE);
+    create_dir(&scope)?;
+    write(&scope.join("cgroup.procs"), &pid.to_string())
+}
+
 /// Enable `controllers` in this cgroup's `cgroup.subtree_control`, so that its
 /// children get the matching interface files.
 fn enable(cgroup: &Path, controllers: &[&str]) -> Result<()> {
@@ -369,10 +401,13 @@ mod tests {
         fn new(name: &str) -> Self {
             let fake = Self::bare(name, "cpuset cpu io memory hugetlb pids rdma\n");
 
-            // As if the slice's mkdir had already happened.
-            let slice = fake.root.join(SLICE);
-            fs::create_dir(&slice).unwrap();
-            fs::write(slice.join("cgroup.subtree_control"), "").unwrap();
+            // As if the mkdirs had already happened.
+            for name in [SLICE, INIT_SCOPE] {
+                let cgroup = fake.root.join(name);
+                fs::create_dir(&cgroup).unwrap();
+                fs::write(cgroup.join("cgroup.subtree_control"), "").unwrap();
+                fs::write(cgroup.join("cgroup.procs"), "").unwrap();
+            }
 
             fake
         }
@@ -421,7 +456,7 @@ mod tests {
 
         // No cgroup.controllers: a cgroup v1 mount, or any other directory.
         assert!(matches!(
-            Hierarchy::new(&dir),
+            Hierarchy::new(&dir, 1),
             Err(CgroupError::NotCgroup2 { .. })
         ));
 
@@ -429,11 +464,41 @@ mod tests {
     }
 
     #[test]
+    fn parks_pid_1_before_delegating() {
+        let fake = Fake::new("initscope");
+        Hierarchy::new(&fake.root, 1).unwrap();
+
+        assert_eq!(
+            read_back(&fake.root.join(INIT_SCOPE).join("cgroup.procs")),
+            "1",
+            "PID 1 has to leave the cgroup that is about to delegate"
+        );
+    }
+
+    #[test]
+    fn a_root_that_will_not_take_init_scope_still_delegates() {
+        // No init.scope interface files, so the move fails — which is what a
+        // read-only or otherwise unwilling root looks like.
+        let fake = Fake::bare("noscope", "memory pids\n");
+        fs::create_dir(fake.root.join(SLICE)).unwrap();
+        fs::write(fake.root.join(SLICE).join("cgroup.subtree_control"), "").unwrap();
+
+        let hierarchy = Hierarchy::new(&fake.root, 1).unwrap();
+
+        // Not fatal: on a real root the exemption still applies, so the only
+        // cost is where PID 1's own memory is accounted.
+        assert_eq!(
+            read_back(&hierarchy.slice().join("cgroup.subtree_control")),
+            "+memory +pids"
+        );
+    }
+
+    #[test]
     fn creates_the_slice() {
         // No controllers, so the delegation writes are skipped and this is a
         // test of the mkdir alone.
         let fake = Fake::bare("slice", "\n");
-        let hierarchy = Hierarchy::new(&fake.root).unwrap();
+        let hierarchy = Hierarchy::new(&fake.root, 1).unwrap();
 
         assert!(hierarchy.slice().is_dir());
         assert!(hierarchy.slice().ends_with(SLICE));
@@ -442,7 +507,7 @@ mod tests {
     #[test]
     fn delegates_controllers_down_to_the_slice() {
         let fake = Fake::new("delegate");
-        let hierarchy = Hierarchy::new(&fake.root).unwrap();
+        let hierarchy = Hierarchy::new(&fake.root, 1).unwrap();
 
         assert_eq!(
             read_back(&fake.root.join("cgroup.subtree_control")),
@@ -461,7 +526,7 @@ mod tests {
         let fake = Fake::new("partial");
         fs::write(fake.root.join("cgroup.controllers"), "cpuset cpu io pids\n").unwrap();
 
-        let hierarchy = Hierarchy::new(&fake.root).unwrap();
+        let hierarchy = Hierarchy::new(&fake.root, 1).unwrap();
 
         assert_eq!(
             read_back(&hierarchy.slice().join("cgroup.subtree_control")),
@@ -473,7 +538,7 @@ mod tests {
     #[test]
     fn a_service_cgroup_is_named_for_its_unit() {
         let fake = Fake::new("naming");
-        let hierarchy = Hierarchy::new(&fake.root).unwrap();
+        let hierarchy = Hierarchy::new(&fake.root, 1).unwrap();
         let cgroup = hierarchy.cgroup("sshd.service");
 
         assert_eq!(cgroup.path(), fake.root.join("oxinit.slice/sshd.service"));
@@ -484,7 +549,7 @@ mod tests {
     #[test]
     fn creating_an_existing_cgroup_is_not_an_error() {
         let fake = Fake::new("recreate");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
 
         cgroup.create().unwrap();
         // A restarting service reuses its cgroup rather than churning it.
@@ -494,7 +559,7 @@ mod tests {
     #[test]
     fn limits_land_in_the_documented_files() {
         let fake = Fake::new("limits");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
         fake.interface(cgroup.path(), false);
 
@@ -512,7 +577,7 @@ mod tests {
     #[test]
     fn an_absent_limit_is_left_alone() {
         let fake = Fake::new("absent");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
         fake.interface(cgroup.path(), false);
 
@@ -527,7 +592,7 @@ mod tests {
     #[test]
     fn memory_max_written_as_the_kernel_spells_it() {
         let fake = Fake::new("max");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
         fake.interface(cgroup.path(), false);
 
@@ -544,7 +609,7 @@ mod tests {
     #[test]
     fn populated_is_read_from_cgroup_events() {
         let fake = Fake::new("populated");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
 
         fake.interface(cgroup.path(), true);
@@ -567,7 +632,7 @@ mod tests {
     #[test]
     fn pids_reads_cgroup_procs() {
         let fake = Fake::new("pids");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
 
         fs::write(cgroup.path().join("cgroup.procs"), "412\n413\n\n").unwrap();
@@ -581,7 +646,7 @@ mod tests {
     #[test]
     fn kill_writes_the_documented_value() {
         let fake = Fake::new("kill");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
         fake.interface(cgroup.path(), true);
 
@@ -592,7 +657,7 @@ mod tests {
     #[test]
     fn stats_read_the_current_files() {
         let fake = Fake::new("stats");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
 
         // Neither controller enabled: reporting, not a failure.
@@ -619,7 +684,7 @@ mod tests {
     #[test]
     fn writing_a_missing_interface_file_is_an_error() {
         let fake = Fake::new("missing");
-        let cgroup = Hierarchy::new(&fake.root).unwrap().cgroup("x.service");
+        let cgroup = Hierarchy::new(&fake.root, 1).unwrap().cgroup("x.service");
         cgroup.create().unwrap();
 
         // No memory.max, because the controller was not delegated. This must
