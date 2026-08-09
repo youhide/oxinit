@@ -20,7 +20,8 @@ rustup target add x86_64-unknown-linux-musl
 
 MSRV is stable minus two releases. No nightly features are used.
 
-**Tools.** `qemu-system-x86_64` and `cpio`.
+**Tools.** `qemu-system-x86_64` and `cpio`. Docker or podman as well, if you
+are running `cargo xtask container`.
 
 ```bash
 # Debian/Ubuntu
@@ -118,6 +119,7 @@ Arriving with the milestones that introduce them:
 ```bash
 cargo test -p oxinit-unit -p oxinit-graph   # M1: host tests, no VM
 cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
+cargo xtask container                       # M6: runs it in Docker, same
 ```
 
 `oxinit-unit` and `oxinit-graph` will have no Linux dependencies and will run
@@ -126,6 +128,11 @@ anywhere. Parser and graph logic belongs there, with tests, rather than in
 
 `test-boot` boots with a timeout and matches expected lines in the serial log. A
 test that hangs fails on the timeout instead of blocking the run.
+
+`container` needs Docker or podman — `--engine podman` — and nothing else. It
+packs the same staged root filesystem as a `FROM scratch` image, runs it, stops
+it the way an operator would, and asserts on the log and the exit code.
+`--privileged` adds a writable cgroupfs and the assertions that need one.
 
 ## Code policy
 
