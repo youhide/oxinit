@@ -208,6 +208,19 @@ impl Instance {
         self.killed = true;
     }
 
+    /// Abandon a pending restart.
+    ///
+    /// A unit waiting out its backoff has no process to signal, so a stop has
+    /// nothing to do to it — but leaving it `Restarting` would have a shutdown
+    /// wait forever for a unit that was never going to come back.
+    pub fn cancel_restart(&mut self) {
+        if self.state == State::Restarting {
+            self.child = None;
+            self.active_since = None;
+            self.state = State::Inactive;
+        }
+    }
+
     /// The cgroup emptied, which ends a stop.
     ///
     /// Returns the backoff delay when a restart applies — which it does only

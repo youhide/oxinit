@@ -220,12 +220,12 @@ Nothing needs it yet.
 
 **Next.**
 
-- [ ] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
+- [x] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
       `cgroup.kill`.
-- [ ] Signal handling: `SIGTERM`, `SIGINT`, `SIGUSR1`, `SIGUSR2`, `SIGPWR`
+- [x] Signal handling: `SIGTERM`, `SIGINT`, `SIGUSR1`, `SIGUSR2`, `SIGPWR`
       mapped to explicit actions. PID 1 has no default dispositions, so an
       unhandled signal does nothing.
-- [ ] Final `sync`, remount read-only, `reboot(2)` with the right command.
+- [x] Final `sync`, remount read-only, `reboot(2)` with the right command.
 - [ ] Control socket: `SOCK_SEQPACKET` at `/run/oxinit/control.sock`, mode
       `0600`.
 - [ ] `oxinit-ipc` request and response types, JSON on the wire.

@@ -140,6 +140,64 @@ kernel property, not something oxinit implements. It also means a signal oxinit
 forgets to handle is silently ignored — the failure mode is an unresponsive
 init, not a dead one.
 
+That is why the table is written down rather than left implicit:
+
+| Signal    | Action                                                          |
+|-----------|-----------------------------------------------------------------|
+| `SIGCHLD` | Reap, and apply each unit's restart policy.                      |
+| `SIGTERM` | Ordered shutdown, then power off.                                |
+| `SIGINT`  | Ordered shutdown, then reboot.                                   |
+| `SIGPWR`  | Ordered shutdown, then power off.                                |
+| `SIGUSR1` | Ordered shutdown, then halt without cutting power.               |
+| `SIGUSR2` | Report every unit's state. Changes nothing.                      |
+
+`SIGTERM` means power off because that is what a container runtime means by
+it, and it is the whole of the contract `docker stop` and a Kubernetes pod
+deletion rely on. On a machine it is not a signal anyone sends to PID 1 by
+accident. `SIGINT` is what the kernel delivers for Ctrl-Alt-Del.
+
+## Shutdown
+
+Shutdown is a **state the supervisor is in**, not a function that runs to
+completion.
+
+Stopping a unit means signalling it and waiting — for its cgroup to empty, or
+for its stop timeout — and both of those arrive as events on the same epoll
+loop as everything else. A blocking shutdown routine would have to
+re-implement the reaper, the timers, and the cgroup notifications it is
+waiting on, during the one part of the boot where getting it wrong strands the
+machine. So instead every unit is asked to stop, the ordinary loop keeps
+running, and each event is also a chance to notice that the last unit has
+gone.
+
+Units are stopped in the reverse of the order they started, so a service goes
+down before whatever it was ordered after.
+
+A target or a socket unit runs no process, so there is nothing to signal and
+nothing to wait for: it stops the moment it is asked to. Sending it through
+the ordinary path would leave it `Deactivating` forever, waiting on an event
+only a process can produce — and a shutdown waiting on that never finishes.
+
+A unit waiting out a restart backoff is likewise not running and not coming
+back, so its pending restart is abandoned rather than waited on.
+
+There is a whole-shutdown deadline on top of each unit's `stop-sec`. It is not
+the normal mechanism — it is the backstop for a unit whose stop path is itself
+broken. A machine that will not power off is worse than one that loses a
+service's last write.
+
+Then `sync`, remount `/` read-only, and `reboot(2)` with the matching command.
+The order is the whole of it: an unflushed filesystem is what makes a reboot
+lose data, and remounting read-only afterwards stops anything still holding a
+write from making more. The remount is best-effort — an initramfs root cannot
+be remounted read-only, and failing there would strand a machine that was
+about to go down cleanly.
+
+If the kernel refuses to reboot at all, oxinit stays up with everything
+stopped and says so. It does not exit: PID 1 exiting is a kernel panic. In a
+container the refusal is expected and exiting is the right answer, which is
+[M6](ROADMAP.md).
+
 Children get the mask reset between `fork` and `exec`. An inherited full block
 mask breaks nearly every daemon, and it breaks the service manager too: a
 service that starts with `SIGTERM` blocked cannot be stopped, only killed.

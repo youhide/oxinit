@@ -33,6 +33,7 @@ mod mounts;
 mod notify;
 mod reap;
 mod shell;
+mod shutdown;
 mod supervisor;
 mod sys;
 mod timer;
@@ -43,9 +44,35 @@ use std::process::{Child, ExitCode};
 
 use crate::error::{Error, Result};
 
-/// `SIGCHLD` is the only signal M0 acts on. The rest are read and discarded so
-/// they cannot accumulate on the signalfd.
+/// The signals oxinit acts on. Everything else is read and discarded so it
+/// cannot accumulate on the signalfd.
+///
+/// PID 1 has no default dispositions — the kernel applies none — so a signal
+/// that is not in this table does nothing at all. That is why the table is
+/// written down rather than left implicit.
 const SIGCHLD: u32 = libc::SIGCHLD as u32;
+
+/// Stop everything and power off.
+///
+/// This is what a container runtime means by `SIGTERM`, and it is the whole
+/// of the contract `docker stop` and a Kubernetes pod deletion rely on. On a
+/// machine it is not something anyone types by accident.
+const SIGTERM: u32 = libc::SIGTERM as u32;
+
+/// Stop everything and reboot. The kernel sends this to PID 1 for
+/// Ctrl-Alt-Del, which is the one keystroke that has to mean something.
+const SIGINT: u32 = libc::SIGINT as u32;
+
+/// Stop everything and halt, without cutting power.
+const SIGUSR1: u32 = libc::SIGUSR1 as u32;
+
+/// Report what every unit is doing. Changes nothing, and is the only way to
+/// ask before the control socket exists.
+const SIGUSR2: u32 = libc::SIGUSR2 as u32;
+
+/// Lost power. Stop everything and power off while there is still power to do
+/// it with.
+const SIGPWR: u32 = libc::SIGPWR as u32;
 
 fn main() -> ExitCode {
     if !rustix::process::getpid().is_init() {
@@ -205,6 +232,21 @@ fn run(
         if result.is_err() {
             eprintln!("oxinit: socket reconciliation panicked; continuing");
         }
+
+        // A shutdown finishes on the same events everything else does: a unit
+        // stops, its cgroup empties, and this is where that turns out to have
+        // been the last one.
+        if let Some(action) = supervisor.settled() {
+            if let Err(e) = shutdown::finalize(action) {
+                // The kernel refused. In a container that is expected —
+                // rebooting is not oxinit's to do there, and exiting instead
+                // is M6. Anywhere else PID 1 exiting is a kernel panic, so
+                // the only option is to stay up and say so.
+                eprintln!("oxinit: {action}: {e}");
+                eprintln!("oxinit: cannot go down; staying up with everything stopped");
+                fallback(Some(signals));
+            }
+        }
     }
 }
 
@@ -220,23 +262,37 @@ fn on_signals(
     }
 
     for signal in pending.iter() {
-        if *signal != SIGCHLD {
-            // PID 1 has no default dispositions, so everything else is read
-            // and dropped rather than ignored by accident. Acting on SIGTERM
-            // and friends is M5.
-            continue;
-        }
+        match *signal {
+            SIGCHLD => {
+                // The fallback shell is not a unit, so it is checked
+                // separately and respawned directly.
+                if let Some(child) = shell.as_mut() {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        // Not during a shutdown: respawning a shell on the
+                        // console is exactly what stops the machine going
+                        // down.
+                        if supervisor.shutting_down() {
+                            *shell = None;
+                        } else {
+                            eprintln!("oxinit: {} exited; respawning", shell::SHELL);
+                            *shell = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+                        }
+                    }
+                }
 
-        // The fallback shell is not a unit, so it is checked separately and
-        // respawned directly.
-        if let Some(child) = shell.as_mut() {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                eprintln!("oxinit: {} exited; respawning", shell::SHELL);
-                *shell = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+                supervisor.on_sigchld();
             }
-        }
 
-        supervisor.on_sigchld();
+            SIGTERM | SIGPWR => supervisor.begin_shutdown(shutdown::Action::PowerOff),
+            SIGINT => supervisor.begin_shutdown(shutdown::Action::Reboot),
+            SIGUSR1 => supervisor.begin_shutdown(shutdown::Action::Halt),
+            SIGUSR2 => supervisor.report(),
+
+            // Read and dropped. PID 1 has no default dispositions, so a
+            // signal oxinit does not handle does nothing — the failure mode
+            // is an unresponsive init, not a dead one.
+            _ => {}
+        }
     }
 }
 

@@ -16,6 +16,7 @@ use crate::event::{EventLoop, Source};
 use crate::listen::Sockets;
 use crate::notify::{self, Notify};
 use crate::reap;
+use crate::shutdown::{Action, Shutdown};
 use crate::sys::raw::{setup_child, ChildSetup, Image, FIRST_LISTEN_FD};
 use crate::timer::{Alarm, Timers};
 
@@ -27,6 +28,9 @@ pub struct Supervisor {
     pub notify: Notify,
     pub cgroups: Cgroups,
     pub sockets: Sockets,
+    /// Set once the machine is going down. Nothing starts after this, and
+    /// every event is also a chance to notice that everything has stopped.
+    shutdown: Option<Shutdown>,
 }
 
 impl Supervisor {
@@ -50,6 +54,7 @@ impl Supervisor {
                 notify,
                 cgroups,
                 sockets: Sockets::new(),
+                shutdown: None,
             };
         }
 
@@ -75,6 +80,7 @@ impl Supervisor {
             notify,
             cgroups,
             sockets: Sockets::new(),
+            shutdown: None,
         };
 
         // An instance for every unit that loaded, not just the ones in the
@@ -124,7 +130,64 @@ impl Supervisor {
         }
     }
 
+    /// Begin an ordered shutdown.
+    ///
+    /// Units are asked to stop in the reverse of the order they started, so a
+    /// service goes down before whatever it was ordered after. Nothing blocks
+    /// here: each stop finishes on its own events, and [`Supervisor::settled`]
+    /// is what notices when they all have.
+    pub fn begin_shutdown(&mut self, action: Action) {
+        if let Some(existing) = self.shutdown.as_ref() {
+            println!("oxinit: already shutting down to {}", existing.action);
+            return;
+        }
+
+        println!("oxinit: shutting down to {action}");
+        self.shutdown = Some(Shutdown::new(action));
+
+        for name in self.order.clone().into_iter().rev() {
+            self.stop(&name, StopCause::Requested);
+        }
+    }
+
+    pub fn shutting_down(&self) -> bool {
+        self.shutdown.is_some()
+    }
+
+    /// What to do now, if anything: `Some(action)` once every unit has
+    /// stopped, or once waiting for the stragglers has gone on long enough.
+    pub fn settled(&self) -> Option<Action> {
+        let shutdown = self.shutdown.as_ref()?;
+
+        let busy: Vec<&str> = self
+            .instances
+            .iter()
+            .filter(|(_, instance)| !is_idle(instance.state))
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        if busy.is_empty() {
+            return Some(shutdown.action);
+        }
+
+        if shutdown.overdue() {
+            eprintln!(
+                "oxinit: giving up waiting for {}; going down anyway",
+                busy.join(", ")
+            );
+            return Some(shutdown.action);
+        }
+
+        None
+    }
+
     fn start(&mut self, name: &str) {
+        // Nothing starts once the machine is going down, including a unit
+        // whose restart timer happens to come due mid-shutdown.
+        if self.shutting_down() {
+            return;
+        }
+
         let Some(instance) = self.instances.get_mut(name) else {
             return;
         };
@@ -420,9 +483,29 @@ impl Supervisor {
             return;
         };
 
+        // A unit waiting out its backoff has no process to signal. Left
+        // `Restarting` it would block a shutdown forever, waiting for
+        // something that is not coming back.
+        if instance.state == State::Restarting {
+            instance.cancel_restart();
+            return;
+        }
+
+        // A target or a socket unit runs no process at all. There is nothing
+        // to signal and nothing to wait for, so it stops the moment it is
+        // asked to. Sending it through the ordinary path would leave it
+        // `Deactivating` forever, waiting on an event only a process can
+        // produce — and a shutdown waiting on that never finishes.
+        if instance.unit.service().is_none() {
+            instance.entered_deactivating(cause);
+            instance.deactivated();
+            println!("oxinit: {name} is {}", instance.state);
+            return;
+        }
+
         if matches!(
             instance.state,
-            State::Inactive | State::Failed | State::Deactivating | State::Restarting
+            State::Inactive | State::Failed | State::Deactivating
         ) {
             return;
         }
@@ -585,6 +668,34 @@ impl Supervisor {
                 Ok(()) => self.sockets.set_armed(id, want),
                 Err(e) => eprintln!("oxinit: {service}: {e}"),
             }
+        }
+    }
+
+    /// Print what every unit is doing.
+    ///
+    /// The whole state of the machine on the console, which until the control
+    /// socket exists is the only way to ask.
+    pub fn report(&self) {
+        println!("oxinit: {} units", self.instances.len());
+
+        for (name, instance) in &self.instances {
+            let kind = match instance.unit.kind {
+                Kind::Service(_) => "service",
+                Kind::Target => "target",
+                Kind::Socket(_) => "socket",
+            };
+
+            print!("  {name} ({kind}): {}", instance.state);
+            if let Some(pid) = instance.pid() {
+                print!(", pid {pid}");
+            }
+            if instance.restarts > 0 {
+                print!(", {} restart(s)", instance.restarts);
+            }
+            if let Some(status) = instance.status.as_deref() {
+                print!(", {status}");
+            }
+            println!();
         }
     }
 
