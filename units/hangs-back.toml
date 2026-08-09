@@ -1,0 +1,15 @@
+# Goes ready, stops pinging, and must come back.
+#
+# ARCHITECTURE argues this asymmetry is the entire point of a watchdog: a
+# watchdog miss takes the restart policy, where an `oxctl stop` overrides it.
+# `hangs` declares `restart = "no"`, so only half of that had ever run.
+[unit]
+description = "Hangs, and is restarted for it"
+
+[service]
+type         = "notify"
+exec         = "/bin/notify-probe --hang-after 1"
+watchdog-sec = "2s"
+stop-sec     = "1s"
+restart      = "on-failure"
+restart-sec  = "400ms"

@@ -203,7 +203,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 12 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 13 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -221,12 +221,13 @@ container's PID 1.
 | **M10** | A real distribution userspace, with dynamically linked services. |
 | **M11** | `after`, `requires` and `conflicts` enforced; `start-sec` bounds activation. |
 | **M12** | CI: every suite above, on every push. |
+| **M13** | Coverage for seven behaviours the milestones claimed and nothing re-ran. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M12. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M13. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 

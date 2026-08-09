@@ -1,0 +1,10 @@
+# `%N` and `%u`. M1 verified `%H` and `%n` and left the other two to a reader
+# of the parser's unit tests — which do cover them, but never against a
+# running machine where `user` is resolved and the unit has a real full name.
+[unit]
+description = "Expands the remaining specifiers"
+
+[service]
+type = "oneshot"
+exec = "/bin/echo oxinit-m13: %N runs as %u"
+user = "nobody"

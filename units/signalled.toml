@@ -1,0 +1,10 @@
+# Killed by a signal rather than exiting. `on-abnormal` restarts on a signal
+# or a timeout and *not* on a non-zero exit, which is the whole difference
+# between it and `on-failure` — and nothing had ever taken either branch.
+[unit]
+description = "Dies on a signal"
+
+[service]
+exec        = '/bin/sh -c "/bin/kill -9 $$"'
+restart     = "on-abnormal"
+restart-sec = "300ms"

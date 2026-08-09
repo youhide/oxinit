@@ -1,0 +1,9 @@
+# `output = "null"`. The assertion is an absence: this token must not reach
+# the console, and `oxlogd` must not have a file for it either.
+[unit]
+description = "Writes to nowhere"
+
+[service]
+type   = "oneshot"
+exec   = "/bin/echo muted-should-never-appear"
+output = "null"
