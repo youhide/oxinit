@@ -23,6 +23,7 @@ fn main() {
         "build" => build().map(|path| println!("{}", path.display())),
         "image" => image(&rest, false).map(|path| println!("{}", path.display())),
         "test-boot" => test_boot(&rest),
+        "container" => container(&rest),
         "" | "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -44,12 +45,18 @@ commands:
   image      build and pack an initramfs, printing its path; does not boot
   boot       build, pack an initramfs, and boot it under QEMU
   test-boot  boot with a timeout and assert on the serial log
+  container  build a container image, run it, and assert on its output
 
 boot options:
   --kernel PATH   kernel image; falls back to $OXINIT_KERNEL, then ./bzImage
   --shell PATH    statically linked shell to place at /bin/sh, normally
                   busybox; falls back to $OXINIT_SHELL. Without one, the image
                   holds only /init and oxinit has no shell to spawn.
+
+container options:
+  --engine NAME   docker (default) or podman
+  --privileged    run with full capabilities and a writable cgroupfs, and
+                  additionally assert that cgroups work
 
 Ctrl-A X exits QEMU.";
 
@@ -161,7 +168,12 @@ const EXPECTED: &[(&str, &str)] = &[
 
 /// Lines that must not appear. A boot that logs one of these has failed even
 /// if everything else is present.
-const FORBIDDEN: &[&str] = &["panicked", "Kernel panic"];
+///
+/// "can't access tty" is busybox reporting that it has no controlling
+/// terminal, which is what `tty = true` on the console unit exists to prevent.
+/// It is asserted as an absence because there is no line to assert on when it
+/// works — a shell with job control simply does not mention it.
+const FORBIDDEN: &[&str] = &["panicked", "Kernel panic", "can't access tty"];
 
 /// Hard limit on the whole boot. A test that hangs has to fail, not block.
 const TEST_TIMEOUT: u32 = 90;
@@ -207,7 +219,15 @@ fn test_boot(args: &[String]) -> Result<(), String> {
     let clean = wait_for(&mut child, TEST_TIMEOUT)?;
     let text = fs::read_to_string(&log).map_err(|e| format!("read {}: {e}", log.display()))?;
 
-    check(&text, clean)
+    let failures = if clean {
+        Vec::new()
+    } else {
+        vec![format!(
+            "qemu had to be killed after {TEST_TIMEOUT}s: the machine never powered off"
+        )]
+    };
+
+    check(&text, EXPECTED, FORBIDDEN, failures)
 }
 
 /// Wait for QEMU, killing it if it overruns. `true` if it exited on its own,
@@ -226,17 +246,18 @@ fn wait_for(child: &mut std::process::Child, seconds: u32) -> Result<bool, Strin
     Ok(false)
 }
 
-/// Compare the log against [`EXPECTED`] and [`FORBIDDEN`].
-fn check(text: &str, clean: bool) -> Result<(), String> {
-    let mut failures = Vec::new();
-
-    if !clean {
-        failures.push(format!(
-            "qemu had to be killed after {TEST_TIMEOUT}s: the machine never powered off"
-        ));
-    }
-
-    for (needle, proves) in EXPECTED {
+/// Compare a log against what it has to contain and what it must not.
+///
+/// `failures` is what the caller already knows went wrong — a machine that
+/// never powered off, a container the runtime had to kill — carried in so that
+/// one report covers everything rather than the caller printing half of it.
+fn check(
+    text: &str,
+    expected: &[(&str, &str)],
+    forbidden: &[&str],
+    mut failures: Vec<String>,
+) -> Result<(), String> {
+    for (needle, proves) in expected {
         if text.contains(needle) {
             println!("  ok    {proves}");
         } else {
@@ -244,14 +265,14 @@ fn check(text: &str, clean: bool) -> Result<(), String> {
         }
     }
 
-    for needle in FORBIDDEN {
+    for needle in forbidden {
         if text.contains(needle) {
             failures.push(format!("log contains `{needle}`"));
         }
     }
 
     if failures.is_empty() {
-        println!("xtask: {} checks passed", EXPECTED.len());
+        println!("xtask: {} checks passed", expected.len());
         return Ok(());
     }
 
@@ -262,17 +283,260 @@ fn check(text: &str, clean: bool) -> Result<(), String> {
     ))
 }
 
-/// Pack the binary as `/init`, optionally with a shell at `/bin/sh`.
+/// What a container log must contain, and what each line proves.
 ///
-/// The kernel unpacks an initramfs and runs `/init`, so oxinit alone is a
-/// valid image. But M0 supervises a shell, and an image containing only
-/// `/init` has no shell to spawn — you get a booting init with no prompt and a
-/// spawn error in the log.
+/// The first three are M6 and nothing else tests them. The middle four are the
+/// same features `test-boot` asserts on under QEMU, checked again here because
+/// "it works when the kernel booted it" and "it works when a runtime execed
+/// it" are different claims.
+const EXPECTED_CONTAINER: &[(&str, &str)] = &[
+    (
+        "oxinit: pid 1 of a container",
+        "M6: the runtime was detected",
+    ),
+    (
+        "oxinit-m1: banner on",
+        "M6: the runtime's stdio was kept — this log exists at all",
+    ),
+    (
+        "already mounted, left alone: /proc",
+        "M6: the runtime's mounts are tolerated, not reported as failures",
+    ),
+    ("oxinit: reached target default", "the graph resolved"),
+    ("is ready", "sd_notify readiness"),
+    ("uid=65534(nobody)", "the privilege drop"),
+    ("got \"echo: hello\"", "socket activation"),
+    (
+        "oxinit: shutting down to power off",
+        "M6: the runtime's stop signal is an ordered shutdown",
+    ),
+    (
+        "power off: exiting with status 0",
+        "M6: exiting, rather than a reboot(2) that is not oxinit's to do",
+    ),
+];
+
+/// Additionally, when the container has the capabilities and a writable
+/// cgroupfs. Unprivileged is the default because it is what `docker run` gives
+/// everyone, and oxinit is supposed to degrade rather than refuse.
+const EXPECTED_PRIVILEGED: &[(&str, &str)] = &[
+    (
+        "oxinit: pid 1 is in",
+        "M5: init.scope, in a container's own cgroup namespace",
+    ),
+    ("limited: memory", "M3: the [resources] limits landed"),
+];
+
+/// "can't access tty" is absent from [`FORBIDDEN`]'s container counterpart on
+/// purpose: a detached container has no terminal for `tty = true` to claim,
+/// and busybox saying so is correct there.
+const FORBIDDEN_CONTAINER: &[&str] = &["panicked"];
+
+const CONTAINER_IMAGE: &str = "oxinit:test";
+const CONTAINER_NAME: &str = "oxinit-container-test";
+
+/// The line that means the boot finished and it is fair to ask for a stop.
+const BOOTED: &str = "oxinit: reached target default";
+
+/// How long to wait for that line.
+const BOOT_TIMEOUT: u32 = 30;
+
+/// How long the runtime waits after `SIGTERM` before `SIGKILL`.
 ///
-/// So `--shell PATH` (or `$OXINIT_SHELL`) adds a statically linked shell,
-/// normally busybox, at `/bin/sh`. Without it the boot still proves the mount,
-/// console, signalfd, and reap paths, which is most of M0.
+/// Deliberately longer than the default ten seconds. A test that failed
+/// because the grace period was tight would be testing the grace period; the
+/// assertion that matters is the exit code, and a `SIGKILL` shows up there as
+/// 137 no matter how long the wait was.
+const STOP_GRACE: u32 = 30;
+
+/// `test-boot` for a runtime that is not QEMU.
+///
+/// Builds the same root filesystem the initramfs is packed from, as a
+/// container image; runs it; waits for the boot to finish; asks the runtime to
+/// stop it the way an operator would; and asserts on the log and on the exit
+/// code. The exit code is the point: before M6 every `docker stop` ended in
+/// `SIGKILL` and 137, because `SIGTERM` did nothing and PID 1 never exited.
+fn container(args: &[String]) -> Result<(), String> {
+    let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
+    let privileged = args.iter().any(|arg| arg == "--privileged");
+
+    let shell = find_shell(args)?;
+    let binary = build()?;
+
+    // `false`, unlike `test-boot`: no unit that ends the test by signalling
+    // PID 1, because what ends this one is the runtime's stop — which is the
+    // thing being tested.
+    let staging = stage(&binary, shell.as_deref(), false)?;
+    let dockerfile = write_dockerfile()?;
+
+    println!("xtask: building {CONTAINER_IMAGE} with {engine}");
+    run(Command::new(&engine).args([
+        "build".as_ref(),
+        "-q".as_ref(),
+        "-t".as_ref(),
+        CONTAINER_IMAGE.as_ref(),
+        "-f".as_ref(),
+        dockerfile.as_os_str(),
+        staging.as_os_str(),
+    ]))?;
+
+    // Left over from a run that was interrupted before it could clean up.
+    remove(&engine);
+
+    let mut start = vec!["run", "-d", "--name", CONTAINER_NAME];
+    if privileged {
+        start.push("--privileged");
+    }
+    start.push(CONTAINER_IMAGE);
+
+    run(Command::new(&engine).args(&start).stdout(Stdio::null()))?;
+
+    let result = drive(&engine, privileged);
+    remove(&engine);
+    result
+}
+
+/// Wait for the boot, stop it, and check what came out.
+///
+/// Split from [`container`] so that the container is removed on every path out
+/// of it, including a failed assertion.
+fn drive(engine: &str, privileged: bool) -> Result<(), String> {
+    println!("xtask: waiting up to {BOOT_TIMEOUT}s for `{BOOTED}`");
+    let booted = wait_for_line(engine, BOOTED, BOOT_TIMEOUT)?;
+
+    let mut failures = Vec::new();
+    if !booted {
+        failures.push(format!("the container never logged `{BOOTED}`"));
+    }
+
+    println!("xtask: asking {engine} to stop it");
+    let started = std::time::Instant::now();
+    run(Command::new(engine)
+        .args(["stop", "-t", &STOP_GRACE.to_string(), CONTAINER_NAME])
+        .stdout(Stdio::null()))?;
+    let took = started.elapsed();
+
+    let status = inspect(engine, "{{.State.ExitCode}}")?;
+    println!(
+        "xtask: stopped in {:.1}s, exit code {status}",
+        took.as_secs_f32()
+    );
+
+    if status != "0" {
+        failures.push(format!(
+            "exit code {status}, not 0. 137 is SIGKILL — the runtime gave up \
+             waiting, which is what M6 exists to fix"
+        ));
+    }
+
+    let mut expected = EXPECTED_CONTAINER.to_vec();
+    if privileged {
+        expected.extend_from_slice(EXPECTED_PRIVILEGED);
+    }
+
+    check(&logs(engine)?, &expected, FORBIDDEN_CONTAINER, failures)
+}
+
+/// Poll the log until `needle` shows up. `false` on timeout.
+fn wait_for_line(engine: &str, needle: &str, seconds: u32) -> Result<bool, String> {
+    for _ in 0..seconds * 5 {
+        if logs(engine)?.contains(needle) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(false)
+}
+
+/// Everything the container has written, both streams.
+///
+/// oxinit reports failures on stderr and everything else on stdout, and the
+/// assertions do not care which — so they are concatenated rather than kept
+/// apart.
+fn logs(engine: &str) -> Result<String, String> {
+    let out = Command::new(engine)
+        .args(["logs", CONTAINER_NAME])
+        .output()
+        .map_err(|e| format!("run {engine} logs: {e}"))?;
+
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr))
+}
+
+fn inspect(engine: &str, format: &str) -> Result<String, String> {
+    let out = Command::new(engine)
+        .args(["inspect", "-f", format, CONTAINER_NAME])
+        .output()
+        .map_err(|e| format!("run {engine} inspect: {e}"))?;
+
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Best-effort, and called on every path out of a run.
+fn remove(engine: &str) {
+    let _ = Command::new(engine)
+        .args(["rm", "-f", CONTAINER_NAME])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// The image is the staged tree and an entrypoint, and nothing else.
+///
+/// `FROM scratch` because there is nothing to layer on: oxinit is statically
+/// linked, and everything it needs — the shell, the client, the units, the
+/// user database — is already in the tree. A base image would only add things
+/// that could hide a missing one.
+///
+/// Written outside the build context so it does not end up inside the image it
+/// describes.
+fn write_dockerfile() -> Result<PathBuf, String> {
+    const DOCKERFILE: &str = "\
+# Written by `cargo xtask container`. The build context is target/initramfs,
+# the same tree `cargo xtask boot` packs into a cpio.
+FROM scratch
+COPY . /
+ENTRYPOINT [\"/init\"]
+";
+
+    let path = root().join("target/oxinit.dockerfile");
+    fs::write(&path, DOCKERFILE).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Pack the staged tree into a cpio initramfs.
 fn pack_initramfs(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
+    let staging = stage(binary, shell, test)?;
+    let image = root().join("target/oxinit.cpio.gz");
+
+    // bsdcpio and GNU cpio both accept `-o -H newc`, which is the format the
+    // kernel's initramfs unpacker reads.
+    let script = format!(
+        "cd {} && find . | cpio --quiet -o -H newc | gzip -9 > {}",
+        shell_quote(&staging),
+        shell_quote(&image),
+    );
+    run(Command::new("sh").arg("-c").arg(script))?;
+
+    Ok(image)
+}
+
+/// Assemble the root filesystem: the binary as `/init`, optionally with a
+/// shell at `/bin/sh`, plus the client, the test fixtures, a user database,
+/// and the units.
+///
+/// One tree, two destinations. The kernel unpacks an initramfs and runs
+/// `/init`, and a container runtime execs the image's entrypoint — which is
+/// the same binary in the same place — so `boot` and `container` are the same
+/// filesystem packed two ways. That is deliberate: a container test that ran a
+/// different image from the QEMU test would not be testing the same thing.
+///
+/// The kernel needs nothing but `/init`, but M0 supervises a shell, and an
+/// image containing only `/init` has no shell to spawn — you get a booting
+/// init with no prompt and a spawn error in the log. So `--shell PATH` (or
+/// `$OXINIT_SHELL`) adds a statically linked shell, normally busybox, at
+/// `/bin/sh`. Without it the boot still proves the mount, console, signalfd,
+/// and reap paths, which is most of M0.
+fn stage(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
     let staging = root().join("target/initramfs");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("create {}: {e}", staging.display()))?;
@@ -338,18 +602,7 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>, test: bool) -> Result<Pat
         }
     }
 
-    let image = root().join("target/oxinit.cpio.gz");
-
-    // bsdcpio and GNU cpio both accept `-o -H newc`, which is the format the
-    // kernel's initramfs unpacker reads.
-    let script = format!(
-        "cd {} && find . | cpio --quiet -o -H newc | gzip -9 > {}",
-        shell_quote(&staging),
-        shell_quote(&image),
-    );
-    run(Command::new("sh").arg("-c").arg(script))?;
-
-    Ok(image)
+    Ok(staging)
 }
 
 /// Applets worth having in a debug shell. busybox is a multi-call binary: it

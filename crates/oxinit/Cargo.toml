@@ -18,5 +18,5 @@ oxinit-ipc = { path = "../oxinit-ipc" }
 oxinit-service = { path = "../oxinit-service" }
 oxinit-unit = { path = "../oxinit-unit" }
 oxinit-user = { path = "../oxinit-user" }
-rustix = { workspace = true, features = ["event", "fs", "mount", "net", "process", "stdio", "system", "time"] }
+rustix = { workspace = true, features = ["event", "fs", "mount", "net", "process", "stdio", "system", "termios", "time"] }
 thiserror.workspace = true

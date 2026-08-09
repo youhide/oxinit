@@ -355,6 +355,31 @@ has.
 
 An unresolvable username at start time fails the unit.
 
+### `tty`
+
+- **Type:** boolean
+- **Required:** no
+- **Default:** `false`
+
+Start the service in its own session, with its standard input as that
+session's controlling terminal. `setsid` then `TIOCSCTTY`, in the child,
+between `fork` and `exec`.
+
+For a login shell or a getty, and for nothing else. Without it a shell on the
+console reports "can't access tty; job control turned off": Ctrl-C reaches
+nothing, `fg` and `bg` do not work, and every program started from that shell
+inherits the same.
+
+**Declare it on exactly one unit per terminal.** A controlling terminal belongs
+to one session, so a second unit claiming the same one takes it from the first.
+That is why this is a key rather than something oxinit infers from stdin
+happening to be a terminal — on a machine that boots to a console, stdin is a
+terminal for *every* service.
+
+Failing to get the terminal does not fail the unit. A service that cannot be
+given job control is a nuisance; a console that will not start is a machine
+with no way in.
+
 ## `[resources]`
 
 Limits applied to the service's cgroup. An absent key means the kernel default,

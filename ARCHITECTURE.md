@@ -4,7 +4,7 @@ This document specifies how oxinit is built. It is written for the person
 implementing it, not for someone evaluating it. Where a decision has a
 non-obvious reason, the reason is stated.
 
-Nothing here is implemented yet. See [ROADMAP.md](ROADMAP.md) for status.
+See [ROADMAP.md](ROADMAP.md) for what is implemented.
 
 ## Process model
 
@@ -64,6 +64,13 @@ gone, the signalfd is unreadable, the state machine is inconsistent — PID 1
 spawns `/bin/sh` on `/dev/console` and keeps reaping. This leaves a machine that
 an operator can log into and inspect. It never calls `exit()`.
 
+**The one exception, and it is not an error path.** In a container, the end of
+an ordered shutdown *is* exiting — see [Machine or container](#machine-or-container).
+Nothing else in the process calls `exit()`, and no failure of any kind reaches
+it: a container whose event loop has broken falls back to a shell like every
+other machine, because a bug in the supervisor is not a reason to take the
+container down.
+
 ## Unsafe policy
 
 Syscalls go through [`rustix`](https://docs.rs/rustix), which wraps the raw
@@ -108,18 +115,85 @@ This is the milestone 0 path, in order.
    | `/run`           | `tmpfs`    |
    | `/sys/fs/cgroup` | `cgroup2`  |
 
-   A mount point that is already mounted is not an error — skip it.
-3. **Wire the console.** Open `/dev/console` and `dup2` it onto fds 0, 1, 2.
-   Before this, output goes nowhere and debugging early boot is guesswork.
-4. **Block all signals** with `sigprocmask(SIG_SETMASK, <full set>)`.
-5. **Create the signalfd** for the full set.
-6. **Set the hostname** from `/etc/hostname`, defaulting to `localhost`.
-7. **Build the event loop** — create the epoll fd, register the signalfd,
+   A mount point that is already mounted is skipped, and that is asked before
+   mounting rather than inferred from the error: mounting over an existing
+   mount is `EBUSY` where oxinit has the privilege and `EPERM` where it does
+   not, and `EPERM` is also what a genuinely missing filesystem returns. The
+   test is two `stat` calls — a directory and its parent share a device unless
+   something is mounted between them — which needs no `/proc`, and `/proc` is
+   the first entry in the table.
+
+   `EPERM` on the rest is collapsed into a single line. Under a container
+   runtime every entry is either already mounted or forbidden, and seven copies
+   of "not permitted" describe work that is already done and offer nothing to
+   do about it.
+3. **Wire the console.** Fill in whichever of fds 0, 1 and 2 is not already
+   open, from `/dev/console`. Before this, output goes nowhere and debugging
+   early boot is guesswork.
+
+   **What was inherited comes first.** A container runtime execs PID 1 with
+   stdio already connected to the pipes it collects logs from, and those images
+   have a `/dev/console` too, so redirecting onto it unconditionally sent every
+   line oxinit wrote to a device nobody was reading. The test is not "am I in a
+   container" but whether the descriptor is open, which is the exact question
+   and gives the same answer on a machine: the kernel hands init `/dev/console`
+   when the image has one, and this keeps it. It opens the console itself in
+   the case the code was written for — an image where the kernel found no
+   console, and left the descriptors closed.
+4. **Detect the environment.** Machine or container, said once. See below.
+5. **Block all signals** with `sigprocmask(SIG_SETMASK, <full set>)`.
+6. **Create the signalfd** for the full set.
+7. **Set the hostname** from `/etc/hostname`, defaulting to `localhost`.
+8. **Build the event loop** — create the epoll fd, register the signalfd,
    create the control socket, notify socket, and timerfd.
-8. **Load units** from the unit directories, build the graph, reject cycles.
-9. **Start the default target.**
+9. **Load units** from the unit directories, build the graph, reject cycles.
+10. **Start the default target.**
 
 Steps 1–3 are the whole of milestone 0 alongside a reap loop and a shell.
+
+## Machine or container
+
+oxinit is a plausible PID 1 for a container: the job there is reaping orphans,
+forwarding signals, and supervising more than one process, which is most of
+what it already does. What it needs is to stop assuming it booted a machine.
+
+**Exactly one thing keys off the answer.** On a machine, a shutdown ends in
+`reboot(2)`. In a container it ends by exiting, because the machine is not
+oxinit's to reboot and the container lives exactly as long as its PID 1 does.
+A supervisor that stopped every unit and then stayed running is a container
+that will not stop, and `docker stop` ends that with `SIGKILL` and exit 137
+ten seconds later.
+
+Everything else decides on its own local evidence. Whether to open
+`/dev/console` is answered by whether stdio is already open; whether to mount
+`/proc` is answered by whether something is mounted there. Those questions have
+exact answers, and "am I in a container" does not: a privileged container has a
+console and can mount, and an initramfs may arrive with filesystems already
+mounted. Deriving the specific from the general would be wrong in both
+directions.
+
+Detection is four checks, first match wins, ordered by how much each proves:
+
+| Evidence                | Says                                            |
+|-------------------------|-------------------------------------------------|
+| `$container`            | The runtime's own name for itself. systemd's convention, followed by podman, LXC and nspawn. |
+| `/run/.containerenv`    | podman.                                          |
+| `/.dockerenv`           | Docker.                                          |
+| No `CAP_SYS_ADMIN`      | Some runtime, unidentified.                      |
+
+The last is the backstop for a runtime that leaves no marker. PID 1 of a
+machine has every capability — the kernel starts it with a full set and nothing
+has run yet to take any away — so one missing `CAP_SYS_ADMIN` was started by
+something that dropped it. It proves there is a runtime and cannot say which,
+which is why it is last, and it is incomplete in the other direction:
+`--privileged` keeps the full set, and such a container is indistinguishable
+from a machine here. That is what the three checks above it are for.
+
+The exit status is the reply to the runtime: `0` for power off and halt, and
+`133` — systemd's convention, honoured by podman — for a reboot oxinit cannot
+perform itself. There is no `sync` and no read-only remount on the way out. The
+filesystems are the runtime's, oxinit is not permitted to seal them, and
+flushing the host's disks from inside a container is not its call.
 
 ## Signals
 
@@ -193,10 +267,12 @@ write from making more. The remount is best-effort — an initramfs root cannot
 be remounted read-only, and failing there would strand a machine that was
 about to go down cleanly.
 
-If the kernel refuses to reboot at all, oxinit stays up with everything
-stopped and says so. It does not exit: PID 1 exiting is a kernel panic. In a
-container the refusal is expected and exiting is the right answer, which is
-[M6](ROADMAP.md).
+In a container none of that last paragraph happens: the shutdown ends by
+exiting, with a status that tells the runtime which way. See
+[Machine or container](#machine-or-container).
+
+If the kernel refuses to reboot a machine, oxinit stays up with everything
+stopped and says so. It does not exit: PID 1 exiting is a kernel panic.
 
 Children get the mask reset between `fork` and `exec`. An inherited full block
 mask breaks nearly every daemon, and it breaks the service manager too: a
@@ -518,16 +594,25 @@ The value written is `0`, which the kernel reads as "the process doing the
 writing". It is the only value that cannot already be stale by the time the
 kernel parses it.
 
-**What the child does between fork and exec.** Three things, in this order,
-and the order is the design:
+**What the child does between fork and exec.** Four things, in this order, and
+the order is the design:
 
 1. Reset the signal mask. Unconditional; see [Signals](#signals).
-2. Write `cgroup.procs`.
-3. `setgroups`, `setgid`, `setuid`.
+2. `setsid` and `TIOCSCTTY`, for a unit that declared `tty`.
+3. Write `cgroup.procs`.
+4. `setgroups`, `setgid`, `setuid`.
 
-Step 2 has to come before step 3, because writing `cgroup.procs` needs exactly
-the privilege step 3 drops. Within step 3, `setuid` last for the same reason —
+Step 3 has to come before step 4, because writing `cgroup.procs` needs exactly
+the privilege step 4 drops. Within step 4, `setuid` last for the same reason —
 reversing it drops the privilege the group calls need, and does so silently.
+
+Step 2 is opt-in per unit and best-effort. A controlling terminal belongs to
+one session, so inferring it from stdin happening to be a terminal would have
+every service on a machine that boots to a console take it from the last one.
+Its failure does not fail the unit: a shell without job control is a nuisance,
+and a console that would not start is a machine with no way in. The fallback
+console shell in `shell.rs` is not a unit and asks for it whenever stdin is a
+terminal, because there is nothing else it could be competing with.
 
 This is also why `Command::uid`/`Command::gid` are not used: they run before
 `pre_exec`, which is the wrong side of step 2, and they pass only the primary
@@ -708,3 +793,13 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
   `cargo xtask test-boot` builds the image, boots it with a timeout, captures
   the serial log, and matches expected lines. A test that hangs fails on the
   timeout rather than blocking forever.
+- **Container tests** are the same thing for a runtime that is not QEMU.
+  `cargo xtask container` packs the *same staged root filesystem* as a `FROM
+  scratch` image, runs it, waits for the boot, asks the runtime to stop it the
+  way an operator would, and asserts on the log and the exit code. One tree,
+  two ways of packing it: a container test running a different image from the
+  QEMU test would not be testing the same thing.
+
+  The exit code is the assertion that matters. `SIGKILL` after a grace period
+  is 137, and every `docker stop` produced it until PID 1 both handled
+  `SIGTERM` and exited afterwards.

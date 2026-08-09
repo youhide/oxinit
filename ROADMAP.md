@@ -297,26 +297,26 @@ would be the wrong order.
 
 ## M6 — Containers
 
-**Next.**
+**Done.**
 
 oxinit is a plausible PID 1 for a container — the job there is reaping
 orphans, forwarding signals, and supervising more than one process, which is
-most of what M0 through M4 already do. What it needs is to stop assuming it
+most of what M0 through M4 already do. What it needed was to stop assuming it
 booted a machine.
 
-- [ ] Detect that the machine is a container, and say so once.
-- [ ] Do not take over `/dev/console` when the runtime already gave PID 1 a
+- [x] Detect that the machine is a container, and say so once.
+- [x] Do not take over `/dev/console` when the runtime already gave PID 1 a
       usable stdio.
-- [ ] Tolerate the pseudo-filesystems the runtime has already mounted, rather
+- [x] Tolerate the pseudo-filesystems the runtime has already mounted, rather
       than reporting seven failures nothing can act on.
-- [ ] `exit()` instead of `reboot(2)` where rebooting is not oxinit's to do —
+- [x] `exit()` instead of `reboot(2)` where rebooting is not oxinit's to do —
       and only there, since exiting is a kernel panic anywhere else.
-- [ ] `cargo xtask container` — build an image, run it, and assert on its
+- [x] `cargo xtask container` — build an image, run it, and assert on its
       output, the way `test-boot` does for QEMU.
-- [ ] README and docs: running oxinit as PID 1 under Docker and Kubernetes,
+- [x] README and docs: running oxinit as PID 1 under Docker and Kubernetes,
       including what `[resources]` means when the runtime already caps the
       container.
-- [ ] Give the console shell a controlling terminal — `setsid` plus
+- [x] Give the console shell a controlling terminal — `setsid` plus
       `TIOCSCTTY` — once it is settled which console it should own.
 
 Measured in a container before any of this was written, against Docker with
@@ -325,19 +325,76 @@ the watchdog, the privilege drop, socket activation over both unix and TCP,
 and orphan reaping — no zombies after a double fork, which is the usual reason
 to reach for `tini`.
 
-What did not, and why each is listed above:
+What did not, and where each was fixed:
 
 | Symptom                                            | Cause                                              |
 |----------------------------------------------------|----------------------------------------------------|
-| `docker stop` always ends in `SIGKILL`, exit 137    | `SIGTERM` and `SIGINT` do nothing yet. M5.         |
-| No output at all from a privileged container        | `/dev/console` exists there, so oxinit redirects stdio onto it and the runtime's pipes see nothing. |
+| `docker stop` always ends in `SIGKILL`, exit 137    | `SIGTERM` and `SIGINT` did nothing. M5, and PID 1 not exiting afterwards. M6. |
+| No output at all from a privileged container        | `/dev/console` exists there, so oxinit redirected stdio onto it and the runtime's pipes saw nothing. |
 | `oxinit.slice` is never created                     | `cgroup.subtree_control` returns `EBUSY`: inside a cgroup namespace the mount root is the container's own cgroup, not the real root, so the internal-process rule applies and PID 1 is in it. M5's `init.scope`. |
-| `%H` expands to `localhost`                         | `sethostname` is refused and the fallback assumes rather than reads. M5. |
+| `%H` expands to `localhost`                         | `sethostname` is refused and the fallback assumed rather than read. M5. |
 | Seven `mount: EPERM` lines before anything else     | The runtime mounted them already.                   |
+
+**Exactly one thing keys off the detection**: on a machine a shutdown ends in
+`reboot(2)`, and in a container it ends by exiting. Everything else decides on
+its own local evidence — whether stdio is already open, whether something is
+already mounted at a path — because those questions have exact answers and "am
+I in a container" does not. A privileged container has a console and can mount;
+an initramfs may arrive with filesystems already there. Deriving the specific
+from the general would have been wrong in both directions.
+
+That is also why the console fix is not conditional. Each of fds 0, 1 and 2 is
+filled from `/dev/console` only if it is not already open, which gives the same
+answer on a machine, where the kernel hands init the console itself. It turned
+up a latent bug on the way: where the kernel had left the descriptors closed —
+the one case the code existed for — `open` returned fd 0, and dropping the
+`OwnedFd` closed the standard input it had just installed.
+
+The controlling terminal, open since M0, needed a decision rather than two
+syscalls. A terminal belongs to one session, so a second claimant takes it from
+the first, and on a machine that boots to a console *every* service has a
+terminal on stdin — inferring it would have had the units take it from each
+other one start at a time. So it is `tty = true` in `[service]`, new in the
+unit format, declared by the one unit that is a console. `test-boot` now fails
+on "can't access tty" rather than tolerating it.
+
+`cargo xtask container` builds the same root filesystem `boot` packs into a
+cpio, as a `FROM scratch` image, runs it, waits for the boot, asks the runtime
+to stop it the way an operator would, and asserts on both the log and the exit
+code. Nine checks unprivileged, eleven with `--privileged`, which adds a
+writable cgroupfs and the two assertions that depend on one. A container test
+that ran a different image from the QEMU test would not be testing the same
+thing, which is why there is one staging tree and two ways of packing it.
+
+Verified against Docker with cgroup v2:
+
+- The detection names the runtime and its evidence — `docker, by /.dockerenv`,
+  or `demo-runtime, by $container` when the runtime says so itself, which is
+  checked first and wins.
+- One line replaces the seven: `already mounted, left alone: /proc, /sys,
+  /dev, /dev/pts, /dev/shm, /sys/fs/cgroup`, and one more for the `/run` the
+  runtime does not mount and oxinit is not permitted to.
+- The log exists at all, which is the whole of the console fix, and holds
+  `READY=1` readiness, `uid=65534(nobody)`, and a socket-activated service
+  answering over a descriptor it found by `LISTEN_FDNAMES`.
+- `docker stop` finishes in 1.1 seconds with exit code 0, against a ten-second
+  grace period that used to expire into a `SIGKILL` and exit 137.
+- Unprivileged, `/sys/fs/cgroup` is read-only: oxinit says so once and carries
+  on, and the unit declaring `[resources]` fails rather than running uncapped.
+  With `--privileged`, `/proc/1/cgroup` is `0::/init.scope` and the limits
+  land.
+
+116 host tests across seven library crates.
+
+Deferred out of M6: `tty` places the service in its own session and claims
+*stdin*, whatever stdin happens to be. A `tty-path` key naming a device — so
+that a unit can own a serial console oxinit itself is not on — is the obvious
+next question and nothing needs it yet.
 
 ## Beyond M6
 
-Not planned, not designed, listed only so the questions have an answer:
+**Next.** Nothing is scheduled. Not planned, not designed, listed only so the
+questions have an answer:
 
 - `aarch64-unknown-linux-musl` as a tested target rather than an assumed one.
 - Replacing JSON with `postcard` on the control socket.

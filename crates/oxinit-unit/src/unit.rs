@@ -91,6 +91,15 @@ pub struct Service {
     /// disables the watchdog.
     pub watchdog_sec: Option<Duration>,
     pub user: String,
+    /// Start the process in its own session and make its standard input the
+    /// session's controlling terminal.
+    ///
+    /// For the one unit that is a login shell or a getty. Without it a shell
+    /// on the console has no job control — no Ctrl-C, no `fg`, no `bg` — and
+    /// passes that on to everything run from it. With it on more than one unit
+    /// the units take the terminal from each other, which is why it is
+    /// declared rather than inferred from stdin happening to be a tty.
+    pub tty: bool,
     pub resources: Resources,
 }
 
@@ -187,6 +196,7 @@ struct RawService {
     stop_sec: Option<DurationValue>,
     watchdog_sec: Option<DurationValue>,
     user: Option<String>,
+    tty: Option<bool>,
 }
 
 /// Targets take no keys. The section's presence is the whole of it.
@@ -299,6 +309,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 stop_sec: service.stop_sec.map_or(DEFAULT_STOP_SEC, |value| value.0),
                 watchdog_sec,
                 user,
+                tty: service.tty.unwrap_or(false),
                 resources: match raw.resources {
                     Some(res) => Resources {
                         memory_max: res.memory_max,
@@ -444,6 +455,12 @@ tasks-max  = 512
     }
 
     #[test]
+    fn tty_is_opt_in() {
+        let unit = parse_ok("console", "[service]\nexec = \"/bin/sh\"\ntty = true\n");
+        assert!(unit.service().unwrap().tty);
+    }
+
+    #[test]
     fn watchdog_requires_type_notify() {
         let ok = "[service]\ntype = \"notify\"\nexec = \"/bin/true\"\nwatchdog-sec = \"30s\"\n";
         let unit = parse_ok("x", ok);
@@ -469,6 +486,7 @@ tasks-max  = 512
         assert_eq!(service.stop_sec, DEFAULT_STOP_SEC);
         assert_eq!(service.watchdog_sec, None, "watchdog is off by default");
         assert_eq!(service.user, "root");
+        assert!(!service.tty, "no controlling terminal by default");
         assert_eq!(service.resources, Resources::default());
         assert_eq!(unit.deps, Deps::default());
     }

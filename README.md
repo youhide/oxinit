@@ -5,8 +5,7 @@ A service manager and PID 1 for Linux, written in Rust.
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange)](ROADMAP.md)
 
-**Pre-alpha. Nothing is stable. Nothing is implemented yet.** See
-[ROADMAP.md](ROADMAP.md).
+**Pre-alpha. Nothing is stable.** See [ROADMAP.md](ROADMAP.md) for what works.
 
 ## Why
 
@@ -81,16 +80,17 @@ service's cgroup.
 
 ## Current state
 
-Milestones 0 through 2 are done. oxinit boots under QEMU, mounts the
-pseudo-filesystems, multiplexes signalfd, timerfd, and the notify socket on one
-epoll loop, parses TOML units, resolves their dependency graph, starts them in
-order, restarts them with exponential backoff when they fail, waits for
-`READY=1` from `sd_notify` services, and kills the ones that miss a watchdog
-deadline.
+Milestones 0 through 6 are done. oxinit boots under QEMU and runs as a
+container's PID 1: it mounts the pseudo-filesystems, multiplexes signalfd,
+timerfd, the notify socket, the control socket and every service's
+`cgroup.events` on one epoll loop, parses TOML units, resolves their dependency
+graph, starts them in order, restarts them with exponential backoff, places
+each service in a cgroup v2 and applies its limits, drops privilege between
+fork and exec, binds and passes listening sockets, answers `oxctl`, and shuts
+the machine down in reverse order.
 
-No cgroups yet, so resource limits are parsed but not applied and
-`type = "forking"` is treated as `simple`. Milestone 3 is next.
-[ROADMAP.md](ROADMAP.md) has the breakdown.
+[ROADMAP.md](ROADMAP.md) has the breakdown, including what each milestone was
+verified against.
 
 ## Running it
 
@@ -110,6 +110,57 @@ qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "co
 
 Edit to boot takes a few seconds. `Ctrl-A X` exits QEMU. Setup details are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## In a container
+
+oxinit works as a container's PID 1. That job is reaping orphans, forwarding
+signals, and supervising more than one process — which is most of what a
+service manager already does, and the reason `tini` and `dumb-init` exist. The
+difference is that oxinit supervises: restart policy, readiness, ordering, and
+a stop that is ordered rather than a broadcast `SIGKILL`.
+
+The image is the binary, the units, and whatever the services need:
+
+```dockerfile
+FROM scratch
+COPY oxinit /init
+COPY units/ /etc/oxinit/units/
+COPY myservice /usr/bin/myservice
+ENTRYPOINT ["/init"]
+```
+
+```bash
+cargo xtask container --privileged
+```
+
+builds exactly that from this repository's own test units, runs it, and asserts
+on the log and on the exit code.
+
+**`docker stop` is an ordered shutdown.** `SIGTERM` stops every unit in the
+reverse of its start order, and oxinit then exits: `0` for a clean stop, `133`
+— systemd's convention, honoured by podman — where a machine would have
+rebooted. Exiting is the whole contract in a container, since the container is
+up for exactly as long as its PID 1 is. A supervisor that stopped everything
+and stayed running is a container the runtime has to `SIGKILL` ten seconds
+later, which is the exit code 137 you have seen.
+
+**The runtime's environment is left alone.** Whatever it already mounted is
+skipped rather than re-mounted or reported, and the stdio it exec'd oxinit with
+is kept rather than redirected onto `/dev/console` — which is what a container
+runtime reads its logs from.
+
+**`[resources]` needs a writable cgroupfs.** By default a runtime mounts
+`/sys/fs/cgroup` read-only, and oxinit says so once and carries on without
+cgroups: no per-service limits, no `type = "forking"` readiness, and
+`cgroup.kill` falls back to signalling the one pid it knows. A unit that
+declared a limit oxinit cannot apply fails rather than running uncapped — the
+unit asked to be capped, and running it uncapped is not a smaller version of
+that. With `--privileged`, or under Kubernetes with the equivalent security
+context, the hierarchy works and the limits land.
+
+Note what those limits mean there: the runtime has already capped the whole
+container, and `[resources]` divides that budget between the units inside it.
+It cannot raise the container's own ceiling.
 
 ## Non-goals
 
@@ -182,7 +233,7 @@ category already uses: sysvinit, runit, dinit.
 ## Contributing
 
 Pre-alpha, so the useful contributions right now are design review and the
-milestone 0 work. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the
+current milestone's work. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the
 development loop, and [ARCHITECTURE.md](ARCHITECTURE.md) before proposing
 changes to the design.
 
