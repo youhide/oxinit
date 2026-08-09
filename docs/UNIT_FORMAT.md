@@ -25,6 +25,7 @@ one of these must be present:
 | `[service]` | service | Specified below.                                    |
 | `[target]`  | target  | A named group of dependencies. Runs no process.     |
 | `[socket]`  | socket  | Specified below. Listens, and starts a service.     |
+| `[timer]`   | timer   | Specified below. Waits, and starts a service.       |
 
 Names are unique across kinds: there cannot be both a `sshd` service and a
 `sshd` target. That is what lets `requires`, `after`, and `oxctl` take a bare
@@ -118,6 +119,7 @@ They mean different things and neither implies the other. See
 | `[service]`   | Exactly one kind section    | How to run the process.        |
 | `[target]`    | Exactly one kind section    | Nothing. Marks the unit a target. |
 | `[socket]`    | Exactly one kind section    | What to listen on, and what to start. |
+| `[timer]`     | Exactly one kind section    | When to fire, and what to start. |
 | `[resources]` | No; service units only      | cgroup limits.                 |
 
 An unknown section is a load error, not a warning. So is an unknown key. A
@@ -557,6 +559,115 @@ The `listen(2)` backlog. Connections beyond it are refused by the kernel.
 Meaningful only for `stream` and `seqpacket`. Setting it alongside
 `type = "datagram"` is a load error rather than a silent no-op, for the same
 reason a typo in `[resources]` is.
+
+## `[timer]`
+
+Starts a service on a schedule. A timer unit runs no process and owns no
+cgroup; being armed is the whole of what it does.
+
+```toml
+# /etc/oxinit/units/backup-timer.toml
+
+[unit]
+description = "Nightly backup"
+
+[timer]
+service     = "backup"
+on-calendar = "03:30"
+```
+
+At least one of `on-boot`, `interval` and `on-calendar` is required. A timer
+with none of them would sit armed forever and look, from outside, like a
+service that never ran, so it is a load error.
+
+When more than one is declared, the next firing is **the soonest of them**.
+That is the only reading of "and" that does not silently ignore one.
+
+### `service`
+
+- **Type:** string
+- **Required:** yes
+
+The unit to start when the timer elapses.
+
+Required rather than inferred from the timer's own name, for the reason a
+socket unit's is: unit names are unique across kinds, which is what lets
+`requires`, `after` and `oxctl` take a bare name — so a timer and its service
+cannot share one.
+
+Like a socket unit, a timer does **not** pull its service in. A service
+reachable from `default` starts at boot whether or not anything scheduled it,
+which is the opposite of what a schedule is for.
+
+**A firing while the service is still running is skipped, not queued.** A job
+that takes longer than its own interval would otherwise accumulate copies of
+itself until the machine fell over, and the firing after it is one interval
+away either way.
+
+**A failed run does not stop the schedule.** The timer is re-armed before the
+service is started. A timer is a statement about *when*, not about whether the
+last run worked; what to do about a failure is `restart` on the service.
+
+### `on-boot`
+
+- **Type:** duration string
+- **Required:** no
+- **Default:** the value of `interval`, if there is one
+
+The first firing, measured from when the timer unit started.
+
+On its own — no `interval`, no `on-calendar` — it is a delayed one-shot: the
+timer fires once and is not re-armed.
+
+### `interval`
+
+- **Type:** duration string
+- **Required:** no
+- **Default:** none
+
+Every firing after the first, measured from the **previous firing**.
+
+Not from the service's last activation, which is the deliberate difference
+from systemd's `OnUnitActiveSec`. It is what the key name says, it does not
+depend on a state transition the service may never make — a `oneshot` service
+never becomes `Active` at all — and it is what anyone writing "every hour"
+means.
+
+With no `on-boot`, the first firing is also one interval away.
+
+### `on-calendar`
+
+- **Type:** string, from a closed vocabulary
+- **Required:** no
+- **Default:** none
+
+A wall-clock schedule.
+
+| Expression  | Fires                                   |
+|-------------|-----------------------------------------|
+| `hourly`    | Every hour, on the hour.                |
+| `daily`     | Every day at 00:00:00.                  |
+| `weekly`    | Every Monday at 00:00:00.               |
+| `HH:MM`     | Every day at that minute.               |
+| `HH:MM:SS`  | Every day at that second.               |
+
+**The vocabulary is closed**, like the specifier set. This is not a cron
+expression and will not grow into one: a schedule nobody can misread is worth
+more than one that can say anything. Anything the table cannot express is an
+argument for a real scheduler, not for a bigger grammar here.
+
+Whitespace is not trimmed. `" 9:00"` is a typo, and a parser that accepts it
+teaches an operator a syntax this document does not describe.
+
+**Times are UTC.** oxinit has no timezone database and is not going to carry
+one.
+
+**A clock step moves a pending firing.** A calendar deadline is computed once,
+as a delay on the monotonic clock, so an NTP correction between arming and
+firing moves that firing by however much the clock moved. Every firing after
+it is recomputed against the corrected clock. Fixing this properly needs a
+`CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`; see
+[ROADMAP.md](../ROADMAP.md).
 
 ## File descriptor passing
 

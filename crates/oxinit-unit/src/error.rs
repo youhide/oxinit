@@ -21,12 +21,25 @@ pub enum UnitError {
 
     #[error(
         "unit `{unit}` has more than one kind section; \
-         use exactly one of [service], [target], [socket]"
+         use exactly one of [service], [target], [socket], [timer]"
     )]
     MultipleKinds { unit: String },
 
     #[error("unit `{unit}`: listen is empty; a socket that listens on nothing does nothing")]
     EmptyListen { unit: String },
+
+    #[error(
+        "unit `{unit}`: a timer needs one of on-boot, interval or on-calendar; \
+         without them it would sit armed and never fire"
+    )]
+    EmptySchedule { unit: String },
+
+    #[error("unit `{unit}`: {source}")]
+    Calendar {
+        unit: String,
+        #[source]
+        source: oxinit_timer::CalendarError,
+    },
 
     #[error(
         "unit `{unit}`: cannot listen on `{address}`: expected `address:port` \

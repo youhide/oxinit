@@ -1,0 +1,9 @@
+# Started by a timer, not by boot. Nothing wants this unit, so it is not
+# reachable from `default` and never runs on its own — which is the point of a
+# schedule, exactly as it is the point of socket activation.
+[unit]
+description = "Started by a timer"
+
+[service]
+type   = "oneshot"
+exec   = "/bin/echo oxinit-m8: stamp fired"

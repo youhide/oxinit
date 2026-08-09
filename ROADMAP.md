@@ -472,11 +472,86 @@ from printing one, and `<unit>.log.1` and up are in the same directory in the
 same format — reading them is `cat`, which is most of the reason the format is
 plain text.
 
-## Beyond M7
+## M8 — Timers
+
+**Done.**
+
+The last thing a service manager is expected to do that oxinit does not.
+Periodic work has to go somewhere, and without this the answer is `cron` —
+a second scheduler, with its own idea of what a job is, no dependency
+ordering, no cgroup, no restart policy and no logs.
+
+- [x] `oxinit-timer`: schedules, calendar expressions, and the civil-date
+      arithmetic that turns one into a moment. Host-tested, no syscalls.
+- [x] `[timer]` units: `service`, `on-boot`, `interval`, `on-calendar`.
+- [x] Arming, firing, and re-arming on the timerfd and deadline heap M2
+      already has.
+- [x] `oxctl` reports when a timer next elapses.
+- [x] `test-boot` asserts a timer fired, fired again on its interval, and
+      that the service it named ran each time.
+
+**Three keys, not systemd's five.** `on-boot` is the first firing, measured
+from when the timer unit started; `interval` is every firing after that,
+measured from the previous one; `on-calendar` is wall-clock. At least one is
+required. `interval` on its own implies an `on-boot` of the same length, and
+`on-boot` on its own is a one-shot delayed task.
+
+Measuring the interval from the previous *firing* rather than from the
+service's last activation is the deliberate difference. It is what the key name
+says, it does not depend on a state transition the service may never make — a
+`oneshot` never becomes `Active` at all — and it is the behaviour anyone
+writing "every hour" expects.
+
+**The calendar vocabulary is closed**, like the specifier set: `hourly`,
+`daily`, `weekly`, and a literal `HH:MM` or `HH:MM:SS`. It is not a cron
+expression and will not grow into one. A schedule nobody can misread is worth
+more than one that can say anything.
+
+**Wall-clock times are UTC.** oxinit has no timezone database and is not going
+to carry one. That is a real limitation and is written down rather than
+implied.
+
+**A timer names its service**, the way a socket unit does, and for the same
+reason: unit names are unique across kinds, which is what lets `requires`,
+`after` and `oxctl` take a bare name. It does not pull it in, either — a
+service reachable from `default` starts at boot whether anything scheduled it
+or not, which is the opposite of what a schedule is for.
+
+**No new machinery.** M2 built one timerfd and a heap of deadlines because
+restart backoff, start timeouts and watchdog intervals are all "wake me in N".
+A schedule is the same statement, so this is one more `Alarm` variant and not
+a second clock.
+
+Two behaviours worth writing down because neither is obvious and both are
+tested: a firing while the service is still running is **skipped, not
+queued**, since a job that outlasts its own interval would otherwise
+accumulate copies of itself; and a failed run does **not** stop the schedule,
+because a timer says *when*, and what to do about a failure is the service's
+`restart`.
+
+Verified under QEMU: `tick-timer` arms with its `on-boot` of 2s, elapses,
+starts `stamp`, which prints and completes — and the timer re-arms with its
+3s `interval` and does it again, repeatedly, over the test image's uptime.
+`stamp` is reachable from nothing, so the only thing that ever started it was
+the schedule.
+
+146 host tests across nine library crates, 14 of them on the calendar
+arithmetic alone — including that firing `daily` at exactly midnight schedules
+the next one a day later rather than the same second, forever.
+
+Deferred out of M8: `persistent`, which would catch up a firing missed while
+the machine was off. It needs state on disk that survives a boot, and where
+that state lives is a bigger question than the feature.
+
+## Beyond M8
 
 Not planned, not designed, listed only so the questions have an answer:
 
 - `aarch64-unknown-linux-musl` as a tested target rather than an assumed one.
+- A `CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`, so a calendar
+  schedule survives the clock being stepped under it. Until then a wall-clock
+  firing is computed as a monotonic delay and an NTP correction moves it by
+  however much the clock moved.
+- Local time, which means a timezone database.
 - Replacing JSON with `postcard` on the control socket.
-- Timer units.
 - A test suite that boots a real distribution userspace rather than a shell.

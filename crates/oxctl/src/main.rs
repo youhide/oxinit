@@ -201,6 +201,9 @@ fn print_units(units: &[UnitStatus], compact: bool) {
         if let Some(status) = unit.status.as_deref() {
             println!("  status       {status}");
         }
+        if let Some(next) = unit.next_elapse {
+            println!("  next         in {next}s");
+        }
         if let Some(memory) = unit.memory {
             println!("  memory       {memory} bytes");
         }

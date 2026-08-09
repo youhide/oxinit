@@ -88,6 +88,26 @@ Nothing runs until something connects, and a restart does not refuse
 connections — the listening socket outlives the process serving them, so they
 queue in the kernel.
 
+A timer unit starts a service on a schedule, and names it the same way:
+
+```toml
+# /etc/oxinit/units/backup-timer.toml
+
+[unit]
+description = "Nightly backup"
+
+[timer]
+service     = "backup"
+on-calendar = "03:30"
+```
+
+`on-boot` and `interval` cover the monotonic cases — first firing, then every
+firing after it, measured from the previous one. The calendar vocabulary is
+deliberately closed: `hourly`, `daily`, `weekly`, `HH:MM`, `HH:MM:SS`, in UTC.
+It is not a cron expression and will not become one. A firing that arrives
+while the service is still running is skipped rather than queued, and a failed
+run does not stop the schedule.
+
 ## oxctl
 
 `oxctl` talks to PID 1 over `/run/oxinit/control.sock`. It is a separate
@@ -178,7 +198,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 7 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 8 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -191,12 +211,13 @@ container's PID 1.
 | **M5** | Ordered shutdown, the signal table, the control socket, `oxctl`. |
 | **M6** | Containers, and a console with a controlling terminal. |
 | **M7** | Logs: a pipe per service, `oxlogd`, rotation, `oxctl logs`. |
+| **M8** | Timer units: `on-boot`, `interval`, and a closed calendar vocabulary. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M7. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M8. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 

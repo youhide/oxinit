@@ -90,6 +90,9 @@ pub struct UnitStatus {
     /// The last `STATUS=` the service sent.
     pub status: Option<String>,
     /// `memory.current`, when the unit has a cgroup and the controller is on.
+    /// Seconds until an armed timer unit next fires. `None` for everything
+    /// else, and for a timer with nothing further scheduled.
+    pub next_elapse: Option<u64>,
     pub memory: Option<u64>,
     /// `pids.current`, likewise.
     pub tasks: Option<u64>,
@@ -149,6 +152,7 @@ mod tests {
             pid: Some(42),
             restarts: 0,
             status: Some("serving".to_owned()),
+            next_elapse: None,
             memory: Some(1024),
             tasks: Some(3),
         }

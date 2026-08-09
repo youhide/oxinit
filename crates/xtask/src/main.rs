@@ -172,6 +172,19 @@ const EXPECTED: &[(&str, &str)] = &[
         "M7: including the last line before it exited",
     ),
     (
+        "oxinit: tick-timer will start stamp in 2s",
+        "M8: a timer arms with on-boot",
+    ),
+    (
+        "oxinit: tick-timer elapsed; starting stamp",
+        "M8: and fires",
+    ),
+    ("oxinit-m8: stamp fired", "M8: the service it named ran"),
+    (
+        "oxinit: tick-timer will start stamp in 3s",
+        "M8: and re-arms with interval, so it fires again",
+    ),
+    (
         "oxinit: shutting down to power off",
         "M5: SIGTERM is handled",
     ),

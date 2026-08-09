@@ -1,0 +1,15 @@
+[package]
+name = "oxinit-timer"
+version = "0.0.0"
+description = "Timer schedules and the calendar arithmetic behind them"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No dependencies and no syscalls. Working out when a schedule next elapses is
+# arithmetic on integers, and getting it wrong means a job that runs twice, at
+# the wrong hour, or never — which is exactly the kind of thing a host test
+# catches and a boot does not.
+[dependencies]

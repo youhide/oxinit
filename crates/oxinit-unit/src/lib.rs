@@ -26,6 +26,6 @@ pub use error::{ExecError, UnitError, ValueError};
 pub use load::{load_default, load_dirs, Loaded, ETC_DIR, VENDOR_DIR};
 pub use unit::{
     parse, Deps, Kind, Listen, Output, Resources, Restart, Service, ServiceType, Socket,
-    SocketType, Unit,
+    SocketType, Timer, Unit,
 };
 pub use value::{parse_duration, parse_size, DurationValue, SizeValue};

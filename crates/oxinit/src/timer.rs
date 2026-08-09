@@ -24,6 +24,8 @@ pub enum Alarm {
     /// A unit's `stop-sec` has elapsed since `SIGTERM`. Whatever is left in
     /// its cgroup gets killed.
     StopTimeout { unit: String },
+    /// A timer unit elapsed. Start what it names, then arm it again.
+    TimerElapsed { unit: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

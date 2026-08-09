@@ -13,6 +13,7 @@ wants       = [
     "chatty",
     "logged",
     "ticker",
+    "tick-timer",
     "quiet",
     "probe",
     "hangs",
