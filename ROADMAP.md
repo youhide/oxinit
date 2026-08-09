@@ -589,7 +589,58 @@ Alpine 6.12 LTS kernel for each architecture. The aarch64 guest reports
 `Machine model: linux,dummy-virt` and a kernel built on `build-3-22-aarch64`,
 so it is genuinely a second architecture and not the first one relabelled.
 
-## Beyond M9
+## M10 — A real userspace
+
+**Done.**
+
+Every image before this one was hand-assembled: one statically linked busybox,
+a `/etc/passwd` with two lines in it, and this project's own binaries. So
+every service oxinit had ever supervised was static, and lived where `xtask`
+had put it.
+
+- [x] `cargo xtask test-distro`: an initramfs built from a real distribution's
+      root filesystem, with oxinit as `/init` on top.
+- [x] The same twenty-six checks, against a userspace this project did not
+      assemble, plus two only a real one can pass.
+- [x] The image is assembled inside the distribution's own container, so the
+      root filesystem keeps its ownership and its modes.
+
+**Every service in it is dynamically linked.** Alpine's busybox needs
+`/lib/ld-musl-x86_64.so.1`, and finding it goes through `sys::raw::Image` —
+the code that lays out the child's argv and environment by hand and execs it
+directly, so that `LISTEN_PID` can be written after the fork. That path had
+never been exercised with anything but a static binary. It works: `ldd /bin/sh`
+run as a unit reports the interpreter, and the twenty-six existing checks pass
+unchanged.
+
+**It is an initramfs, not a disk, and that is a finding rather than a
+shortcut.** Booting a distribution's root off a block device needs a kernel
+with both a disk driver and a filesystem built in. Alpine builds all
+thirty-four of its filesystems as modules — `CONFIG_EXT4_FS=m`,
+`CONFIG_VIRTIO_BLK=m`, even in the `virt` flavour meant for VMs — which is
+exactly what its initramfs exists to load before it `switch_root`s. Reaching a
+disk root would mean oxinit growing a `switch_root`, and pivoting the root is
+a job [README.md](README.md) says this project does not do. So oxinit sits
+where it always did in the boot chain: after someone else's initramfs, or as
+the initramfs. Confirmed by booting one: `Kernel panic — VFS: Unable to mount
+root fs on "/dev/vda"`.
+
+Two things the real userspace corrected, both in this repository rather than
+in oxinit:
+
+- `/bin/id` does not exist on Alpine; `id` is in `/usr/bin`. A unit names an
+  absolute path, so the layout of the image is part of what the unit says. The
+  hand-assembled image now follows the distribution rather than the other way
+  round, and one unit set runs on both.
+- The test group was gid 100, which a real distribution has already given to
+  `users`. It is 900 now.
+
+Verified: `cargo xtask test-distro`, 28 checks against Alpine 3.22.5 — the
+release file read by a unit, `ld-musl-x86_64.so.1` reported by another, and
+`uid=65534(nobody) gid=65534(nobody) groups=900(oxinit),65534(nobody)` from
+the distribution's own user database rather than from a file xtask wrote.
+
+## Beyond M10
 
 Not planned, not designed, listed only so the questions have an answer:
 

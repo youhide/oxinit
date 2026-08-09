@@ -4,10 +4,15 @@
 #
 # `id` should print uid=65534(nobody) and the supplementary group from
 # /etc/group, not just the primary one.
+#
+# `/usr/bin/id`, not `/bin/id`. A unit names an absolute path, so the layout
+# of the image is part of what the unit says — and a real distribution puts
+# `id` in /usr/bin. The hand-assembled image follows the distribution rather
+# than the other way round.
 [unit]
 description = "Drops privilege before exec"
 
 [service]
 type = "oneshot"
-exec = "/bin/id"
+exec = "/usr/bin/id"
 user = "nobody"

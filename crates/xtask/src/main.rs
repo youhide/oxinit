@@ -97,6 +97,7 @@ fn main() {
             .map(|path| println!("{}", path.display())),
         "test-boot" => test_boot_all(&rest),
         "container" => container(&rest),
+        "test-distro" => test_distro(&rest),
         "" | "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -119,6 +120,8 @@ commands:
   boot       build, pack an initramfs, and boot it under QEMU
   test-boot  boot with a timeout and assert on the serial log
   container  build a container image, run it, and assert on its output
+  test-distro
+             boot a real distribution userspace and assert on the serial log
 
 options:
   --arch NAME     x86_64 (default), aarch64, or `all` for test-boot, which
@@ -221,7 +224,7 @@ const EXPECTED: &[(&str, &str)] = &[
         "uid=65534(nobody)",
         "M3: privilege drop, with supplementary groups",
     ),
-    ("groups=100(oxinit)", "M3: setgroups, not just setgid"),
+    ("groups=900(oxinit)", "M3: setgroups, not just setgid"),
     (
         "forked and is ready",
         "M3: forking readiness from cgroup.populated",
@@ -446,6 +449,184 @@ fn check(
         failures.join("\n  ")
     ))
 }
+
+/// The distribution the userspace comes from.
+///
+/// Pinned, because "whatever :latest is today" is not something a test result
+/// can be attributed to.
+const DISTRO_IMAGE: &str = "alpine:3.22";
+
+/// On top of [`EXPECTED`], which the distro image runs unchanged — the same
+/// units, the same twenty-six claims, against a userspace this project did not
+/// assemble.
+const EXPECTED_DISTRO: &[(&str, &str)] = &[
+    (
+        "oxinit-m10: alpine 3.22",
+        "M10: the root filesystem is the distribution's, not xtask's",
+    ),
+    (
+        "ld-musl",
+        "M10: a service was a dynamically linked binary and found its interpreter",
+    ),
+];
+
+/// Boot oxinit as `/init` over a real distribution's root filesystem.
+///
+/// Every image before this one was hand-assembled: one statically linked
+/// busybox, a passwd file with two lines in it, and this project's own
+/// binaries. So every service oxinit had ever exec'd was static, and lived
+/// where xtask had put it.
+///
+/// Here the root filesystem is Alpine's own, and every service in it is a
+/// dynamically linked binary that has to find `/lib/ld-musl-*.so.1` — through
+/// `sys::raw::Image`, which builds the child's argv and environment by hand
+/// and execs it directly. No previous test reached that with a dynamic binary.
+///
+/// The image is assembled inside a container rather than on the host, so the
+/// root filesystem keeps its ownership and its modes. A cpio packed from a
+/// tree unpacked on macOS would have every file owned by whoever ran the test.
+///
+/// **Not a disk.** Booting a distribution's root from a block device needs a
+/// kernel with both a disk driver and a filesystem built in, and Alpine builds
+/// all thirty-four of its filesystems as modules — which is what its initramfs
+/// exists to load before it `switch_root`s. Doing that here would mean oxinit
+/// growing a `switch_root`, and being the thing that pivots the root is a job
+/// this project says it does not do. So the distribution's userspace arrives
+/// the way oxinit already supports: as the initramfs.
+fn test_distro(args: &[String]) -> Result<(), String> {
+    let arch = find_arch(args)?;
+    let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
+    let kernel = find_kernel(arch, args)?;
+
+    // No shell: the distribution brings its own, and a busybox from xtask
+    // landing on top of Alpine's would be the opposite of the point.
+    let binary = build(arch)?;
+    let overlay = stage(arch, &binary, None, true)?;
+
+    let name = format!("oxinit-distro-{}.cpio.gz", arch.name);
+    let image = root().join("target").join(&name);
+    let script = root().join("target/oxinit-distro.sh");
+    fs::write(&script, DISTRO_SCRIPT).map_err(|e| format!("write {}: {e}", script.display()))?;
+
+    println!("xtask: assembling a {DISTRO_IMAGE} initramfs with {engine}");
+    let argv: Vec<String> = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "-v".to_owned(),
+        format!("{}:/overlay:ro", overlay.display()),
+        "-v".to_owned(),
+        format!("{}:/build.sh:ro", script.display()),
+        "-v".to_owned(),
+        format!("{}:/out", root().join("target").display()),
+        DISTRO_IMAGE.to_owned(),
+        "/bin/sh".to_owned(),
+        "/build.sh".to_owned(),
+        name.clone(),
+    ];
+
+    run(Command::new(&engine).args(&argv))?;
+
+    let log = root().join(format!("target/test-distro-{}.log", arch.name));
+    let _ = fs::remove_file(&log);
+
+    println!(
+        "xtask: booting {} with a {}s limit, logging to {}",
+        arch.name,
+        arch.timeout,
+        log.display()
+    );
+
+    let mut child = Command::new(arch.qemu)
+        .args(arch.machine)
+        .args([
+            "-kernel".as_ref(),
+            kernel.as_os_str(),
+            "-initrd".as_ref(),
+            image.as_os_str(),
+            "-display".as_ref(),
+            "none".as_ref(),
+            "-serial".as_ref(),
+            format!("file:{}", log.display()).as_ref(),
+            "-append".as_ref(),
+            format!("console={}", arch.console).as_ref(),
+            "-m".as_ref(),
+            "512".as_ref(),
+        ])
+        .spawn()
+        .map_err(|e| format!("run {}: {e}", arch.qemu))?;
+
+    let clean = wait_for(&mut child, arch.timeout)?;
+    let text = fs::read_to_string(&log).map_err(|e| format!("read {}: {e}", log.display()))?;
+
+    let failures = if clean {
+        Vec::new()
+    } else {
+        vec![format!(
+            "qemu had to be killed after {}s: the machine never powered off",
+            arch.timeout
+        )]
+    };
+
+    let mut expected = EXPECTED.to_vec();
+    expected.extend_from_slice(EXPECTED_DISTRO);
+
+    check(&text, &expected, FORBIDDEN, failures)
+}
+
+/// Assemble the initramfs from inside the distribution's own image.
+///
+/// Runs as root in the container, so the root filesystem keeps its ownership
+/// and its modes — which a tree unpacked on a macOS host would not.
+///
+/// `/etc/passwd` and `/etc/group` are the distribution's and are left alone,
+/// except for the one group the privilege-drop unit needs, which is appended
+/// rather than substituted. Overwriting them with xtask's two-line versions
+/// would throw away most of what makes this a real userspace.
+const DISTRO_SCRIPT: &str = r#"#!/bin/sh
+# Written by `cargo xtask test-distro`. Runs inside the distribution's image.
+set -e
+
+apk add --no-cache cpio >/dev/null 2>&1
+
+mkdir -p /rootfs
+# The distribution's own root, minus the pseudo-filesystems the kernel and
+# oxinit provide, and minus the tree being built.
+for d in bin etc lib sbin usr var srv media mnt opt home root; do
+    [ -e "/$d" ] && cp -a "/$d" /rootfs/
+done
+mkdir -p /rootfs/proc /rootfs/sys /rootfs/dev /rootfs/run /rootfs/tmp /rootfs/var/log
+
+# oxinit on top. Not /etc/passwd or /etc/group: those are the distribution's.
+cp -a /overlay/init /rootfs/init
+cp -a /overlay/bin/. /rootfs/bin/
+mkdir -p /rootfs/etc/oxinit
+cp -a /overlay/etc/oxinit/units /rootfs/etc/oxinit/
+
+# The one group the privilege-drop unit needs, added rather than substituted.
+echo 'oxinit:x:900:nobody' >> /rootfs/etc/group
+
+# A unit that can only pass on a real userspace: it reads the distribution's
+# own release file, and asks the dynamic loader what /bin/sh needs to run.
+cat > /rootfs/etc/oxinit/units/userspace.toml <<'UNIT'
+# Written by `cargo xtask test-distro`. Not in units/.
+[unit]
+description = "What userland this is"
+
+[service]
+type = "oneshot"
+exec = '''/bin/sh -c "/bin/echo oxinit-m10: alpine $(/bin/cat /etc/alpine-release); /usr/bin/ldd /bin/sh"'''
+UNIT
+
+sed -i 's|^wants       = \[|wants       = [\n    "userspace",|' /rootfs/etc/oxinit/units/default.toml
+grep -q '"userspace"' /rootfs/etc/oxinit/units/default.toml || {
+    echo "build.sh: could not pull userspace into default" >&2
+    exit 1
+}
+
+cd /rootfs
+find . | cpio --quiet -o -H newc | gzip -9 > "/out/$1"
+echo "build.sh: packed $(find . | wc -l) paths from $(cat /etc/alpine-release)"
+"#;
 
 /// What a container log must contain, and what each line proves.
 ///
@@ -800,7 +981,7 @@ fn stage(arch: Arch, binary: &Path, shell: Option<&Path>, test: bool) -> Result<
             install(path, &bin.join("sh"))?;
 
             if is_busybox(path) {
-                install_applets(path, &bin)?;
+                install_applets(path, &staging)?;
             }
         }
         None => println!(
@@ -934,7 +1115,7 @@ nobody:x:65534:65534:nobody:/:/bin/false
 
     const GROUP: &str = "\
 root:x:0:
-oxinit:x:100:nobody
+oxinit:x:900:nobody
 nogroup:x:65534:
 ";
 
@@ -947,17 +1128,34 @@ nogroup:x:65534:
     Ok(())
 }
 
+/// Applets a real distribution puts in `/usr/bin` rather than `/bin`.
+///
+/// A unit names an absolute path, so where an applet lives is part of what the
+/// unit says. The hand-assembled image follows Alpine here rather than the
+/// other way round, so one unit set works on both.
+const USR_BIN_APPLETS: &[&str] = &["id"];
+
 /// Install busybox under its own name plus a symlink per applet.
-fn install_applets(shell: &Path, bin: &Path) -> Result<(), String> {
+fn install_applets(shell: &Path, root: &Path) -> Result<(), String> {
+    let bin = root.join("bin");
     let busybox = bin.join("busybox");
     install(shell, &busybox)?;
 
+    let usr_bin = root.join("usr/bin");
+    fs::create_dir_all(&usr_bin).map_err(|e| format!("create {}: {e}", usr_bin.display()))?;
+
     for applet in APPLETS {
-        let link = bin.join(applet);
+        let (dir, target) = if USR_BIN_APPLETS.contains(applet) {
+            (&usr_bin, "../../bin/busybox")
+        } else {
+            (&bin, "busybox")
+        };
+
+        let link = dir.join(applet);
         let _ = fs::remove_file(&link);
 
         #[cfg(unix)]
-        std::os::unix::fs::symlink("busybox", &link)
+        std::os::unix::fs::symlink(target, &link)
             .map_err(|e| format!("symlink {}: {e}", link.display()))?;
     }
 

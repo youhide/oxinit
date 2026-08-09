@@ -198,7 +198,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 9 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 10 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -213,12 +213,13 @@ container's PID 1.
 | **M7** | Logs: a pipe per service, `oxlogd`, rotation, `oxctl logs`. |
 | **M8** | Timer units: `on-boot`, `interval`, and a closed calendar vocabulary. |
 | **M9** | aarch64 as a tested target, not an assumed one. Both boot the same suite. |
+| **M10** | A real distribution userspace, with dynamically linked services. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M9. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M10. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 
@@ -246,6 +247,7 @@ Two suites assert on that boot rather than asking you to watch it:
 ```bash
 cargo xtask test-boot --arch all   # boots x86_64 and aarch64, matches the log
 cargo xtask container              # runs it in Docker, checks the exit code
+cargo xtask test-distro            # boots a real Alpine userspace
 ```
 
 The library crates test on any host, with no VM and no kernel:
@@ -317,7 +319,9 @@ oxinit does not, and will not:
 - Implement an NTP client.
 - Manage network configuration.
 - Run containers. It runs *inside* one, as PID 1; it does not start one.
-- Boot the machine — it is not a bootloader.
+- Boot the machine — it is not a bootloader, and it does not `switch_root`.
+  On a real machine oxinit is what a distribution's initramfs hands over to;
+  in a container and in `test-distro` it is the initramfs.
 - Manage logins or sessions.
 
 It also will **not** aim for compatibility with systemd unit files. Supporting a
