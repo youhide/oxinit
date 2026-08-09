@@ -1,0 +1,152 @@
+# Every guarantee in ROADMAP.md was, until this file existed, a claim about
+# something someone had run once on their own machine. This runs them.
+#
+# Split by cost. `check` is seconds and gates everything; the boot suites are
+# minutes each and run in parallel with one another. aarch64 has no hardware
+# acceleration on an x86_64 runner, so its boot goes through QEMU's JIT and is
+# the slowest thing here by a wide margin.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first. Nothing here is worth finishing for a
+# commit that is already history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build should not also cost a stack trace nobody reads.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the musl targets
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      # Both targets. The oxinit crate refuses to compile off Linux, and a
+      # lint that only ever ran against one architecture is a lint that has
+      # not run against the other.
+      - run: cargo clippy --target x86_64-unknown-linux-musl --workspace --all-targets -- -D warnings
+      - run: cargo clippy --target aarch64-unknown-linux-musl --workspace --all-targets -- -D warnings
+
+      # The library crates have no OS dependency and run on the host. The
+      # parser, the graph, the restart policy, the log format and the calendar
+      # arithmetic are where the logic errors are.
+      - name: Host tests
+        run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer
+
+  boot:
+    name: boot (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup target add ${{ matrix.arch }}-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: QEMU and cpio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-system-arm cpio
+
+      # Keyed on the Alpine release the fetch is pinned to, so a bump
+      # invalidates it and nothing else does.
+      - name: Cache the boot artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/vmlinuz-${{ matrix.arch }}
+            target/busybox-${{ matrix.arch }}
+          key: alpine-v3.22-${{ matrix.arch }}
+
+      - run: cargo xtask fetch --arch ${{ matrix.arch }}
+
+      - run: cargo xtask test-boot --arch ${{ matrix.arch }}
+
+      # The log is the whole evidence, and a failure that only says which
+      # needle was missing is a failure you have to reproduce locally to read.
+      - name: The serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-${{ matrix.arch }}
+          path: target/test-boot-${{ matrix.arch }}.log
+          if-no-files-found: ignore
+
+  container:
+    name: container
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cpio
+
+      - name: Cache the boot artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/busybox-x86_64
+          key: alpine-v3.22-x86_64-shell
+
+      - run: cargo xtask fetch --arch x86_64
+
+      # Docker is already on the runner, which is the only thing this needs
+      # beyond the build.
+      - run: cargo xtask container
+
+  distro:
+    name: a real userspace
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      - name: QEMU and cpio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 cpio
+
+      - name: Cache the boot artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/vmlinuz-x86_64
+          key: alpine-v3.22-x86_64-kernel
+
+      - run: cargo xtask fetch --arch x86_64
+
+      - run: cargo xtask test-distro
+
+      - name: The serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-distro
+          path: target/test-distro-x86_64.log
+          if-no-files-found: ignore

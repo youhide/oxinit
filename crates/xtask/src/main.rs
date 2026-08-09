@@ -98,6 +98,7 @@ fn main() {
         "test-boot" => test_boot_all(&rest),
         "container" => container(&rest),
         "test-distro" => test_distro(&rest),
+        "fetch" => fetch(&rest),
         "" | "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -122,6 +123,7 @@ commands:
   container  build a container image, run it, and assert on its output
   test-distro
              boot a real distribution userspace and assert on the serial log
+  fetch      download the kernel and busybox a boot needs, into target/
 
 options:
   --arch NAME     x86_64 (default), aarch64, or `all` for test-boot, which
@@ -488,6 +490,108 @@ fn check(
         failures.len(),
         failures.join("\n  ")
     ))
+}
+
+/// The distribution the boot artifacts come from.
+///
+/// Pinned to a release rather than tracking edge: a kernel is half of what a
+/// boot result is attributable to, and "whatever was current that week" is not
+/// an attribution.
+const ALPINE: &str = "v3.22";
+const MIRROR: &str = "https://dl-cdn.alpinelinux.org/alpine";
+
+/// Download the kernel and the shell a boot needs, into `target/`.
+///
+/// `xtask` looks for `target/vmlinuz-<arch>` and `target/busybox-<arch>`, and
+/// before this existed every contributor and every CI run had to find them
+/// themselves — which meant the documented setup was a paragraph of prose
+/// about where Alpine keeps things.
+///
+/// Alpine because it publishes both architectures in the same layout, ships a
+/// statically linked busybox as a package, and builds a kernel small enough to
+/// download on every cache miss.
+fn fetch(args: &[String]) -> Result<(), String> {
+    let arch = find_arch(args)?;
+    let target = root().join("target");
+    fs::create_dir_all(&target).map_err(|e| format!("create {}: {e}", target.display()))?;
+
+    let kernel = target.join(format!("vmlinuz-{}", arch.name));
+    if kernel.exists() {
+        println!("xtask: {} is already here", kernel.display());
+    } else {
+        let url = format!(
+            "{MIRROR}/{ALPINE}/releases/{}/netboot/vmlinuz-lts",
+            arch.name
+        );
+        println!("xtask: fetching {url}");
+        download(&url, &kernel)?;
+    }
+
+    let shell = target.join(format!("busybox-{}", arch.name));
+    if shell.exists() {
+        println!("xtask: {} is already here", shell.display());
+        return Ok(());
+    }
+
+    // The package name carries its version, and the version moves. Read the
+    // index rather than pinning a filename that goes stale on the next
+    // point release.
+    let index = format!("{MIRROR}/{ALPINE}/main/{}/", arch.name);
+    let listing = capture("curl", &["-sfL", &index])?;
+
+    let package = listing
+        .match_indices("busybox-static-")
+        .find_map(|(at, _)| {
+            let rest = listing.get(at..)?;
+            let end = rest.find(".apk")? + ".apk".len();
+            rest.get(..end)
+        })
+        .ok_or_else(|| format!("no busybox-static package listed at {index}"))?;
+
+    let url = format!("{index}{package}");
+    println!("xtask: fetching {url}");
+
+    let apk = target.join("busybox-static.apk");
+    download(&url, &apk)?;
+
+    // An apk is a gzipped tar, and the one file wanted out of it is the
+    // statically linked binary.
+    run(Command::new("tar")
+        .args(["xzf", &apk.to_string_lossy(), "bin/busybox.static"])
+        .current_dir(&target))?;
+
+    fs::rename(target.join("bin/busybox.static"), &shell)
+        .map_err(|e| format!("move busybox.static: {e}"))?;
+    let _ = fs::remove_dir(target.join("bin"));
+    let _ = fs::remove_file(&apk);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {}: {e}", shell.display()))?;
+    }
+
+    println!("xtask: {} ready", shell.display());
+    Ok(())
+}
+
+fn download(url: &str, to: &Path) -> Result<(), String> {
+    run(Command::new("curl").args(["-sfL".as_ref(), "-o".as_ref(), to.as_os_str(), url.as_ref()]))
+}
+
+/// Run something and return its standard output.
+fn capture(program: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("run {program}: {e}"))?;
+
+    if !out.status.success() {
+        return Err(format!("{program} failed with {}", out.status));
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The distribution the userspace comes from.
