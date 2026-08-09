@@ -391,13 +391,62 @@ Deferred out of M6: `tty` places the service in its own session and claims
 that a unit can own a serial console oxinit itself is not on — is the obvious
 next question and nothing needs it yet.
 
-## Beyond M6
+## M7 — Logs
 
-**Next.** Nothing is scheduled. Not planned, not designed, listed only so the
-questions have an answer:
+**Next.**
+
+A service's output goes wherever PID 1's happened to go. Every unit on the
+machine writes to one console, nothing says which unit a line came from, and
+nothing keeps any of it. It is the largest thing a service manager is expected
+to do that oxinit does not.
+
+- [ ] `oxinit-log`: record format, line splitting, rotation policy, paths.
+      Host-tested, no syscalls.
+- [ ] `oxlogd`: a separate process that reads service output and writes it.
+- [ ] One pipe per service start. The write end goes to the child; the read
+      end is passed to `oxlogd` over a unix socket with `SCM_RIGHTS`.
+- [ ] `output` in `[service]`: `console`, `log`, `null`.
+- [ ] Size-based rotation, bounded on disk.
+- [ ] `oxctl logs <unit>`.
+- [ ] `test-boot` and `container` assert a service's output landed in its own
+      file, and that the console no longer carries it.
+
+**PID 1 reads no service output.** It creates the pipe, gives the write end to
+the child, and passes the read end on. That is the whole reason there is a
+second process: a service that writes a megabyte a second must not be able to
+make PID 1 do work, and a bug in a log writer must kill a log writer. It is the
+same argument that put `oxctl` out of process, applied to the one remaining
+thing that would otherwise have to live inside the event loop.
+
+**PID 1 keeps the read end rather than giving it away.** `oxlogd` is a
+supervised service and can restart. If PID 1 handed over its only copy, the
+last close would break every running service's stdout, and a service killed by
+`SIGPIPE` because the log daemon bounced is worse than a service with no logs.
+Holding it means a reconnecting `oxlogd` is handed every descriptor again.
+
+The cost is stated rather than hidden: with no `oxlogd` connected, output backs
+up in the pipe, and a service that fills it blocks on write. That is bounded by
+the pipe buffer, it is recoverable, and it is why `output` defaults to
+`console` rather than to `log`.
+
+**PID 1 is the server.** `oxlogd` connects to `/run/oxinit/log.sock`. PID 1
+already owns a listening socket and an event loop; the other direction would
+have PID 1 connecting to a service it supervises, at every service start, and
+deciding what to do when that fails.
+
+**`stdout` and `stderr` share one pipe.** The order in which a service wrote to
+its two streams is information, and two pipes would destroy it — they would be
+read independently and interleaved by whichever the reader got to first.
+
+**Logs are files, and `oxctl logs` reads them.** Not proxied through the
+control socket: that is the one socket that has to stay responsive, and bulk
+data is exactly what would stop it being.
+
+## Beyond M7
+
+Not planned, not designed, listed only so the questions have an answer:
 
 - `aarch64-unknown-linux-musl` as a tested target rather than an assumed one.
 - Replacing JSON with `postcard` on the control socket.
-- Log shipping as a separate process reading service output.
 - Timer units.
 - A test suite that boots a real distribution userspace rather than a shell.

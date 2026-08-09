@@ -15,7 +15,7 @@ and sequences shutdown.
 Everything else is a separate process talking to PID 1 over a unix socket:
 
 - `oxctl` — the CLI client.
-- Log shipping — reads service output, writes it somewhere.
+- `oxlogd` — reads service output, writes it somewhere. See [Logs](#logs).
 - Device management — uevent handling, if it ever exists.
 
 The reason is blast radius. A bug in a log shipper kills a log shipper. A bug in
@@ -682,6 +682,82 @@ A unit is `Deactivating` until its cgroup empties — not until its main process
 exits, because a service that forked children is not stopped while they are
 still running.
 
+## Logs
+
+A service's output goes to a pipe, and the pipe goes to `oxlogd`, which writes
+`/var/log/oxinit/<unit>.log`. `[service] output` picks between `console` — the
+descriptors oxinit itself has, which is what happened before there was anything
+else — `log`, and `null`.
+
+**PID 1 reads no service output.** It creates the pipe, hands the write end to
+the child, and passes the read end on. That is the whole reason there is a
+second process, and it is the same argument that put `oxctl` out of process: a
+service writing a megabyte a second must not be able to make PID 1 do work, and
+a bug in a log writer must kill a log writer.
+
+```
+service ──write──> pipe ──read──> oxlogd ──> /var/log/oxinit/<unit>.log
+                     ^
+                     └── read end held, never read, by PID 1
+```
+
+**PID 1 keeps the read end rather than giving it away.** `oxlogd` is a
+supervised service like any other and can restart. If PID 1 passed its only
+copy, the last close would break every running service's stdout, and a service
+killed by `SIGPIPE` because the log daemon bounced is worse than a service with
+no logs. Keeping it means a reconnecting `oxlogd` is handed every descriptor
+again, and a running service never notices there was a gap.
+
+The cost: with nothing connected, output backs up in the pipe, and a service
+that fills it blocks on write. oxinit raises the pipe to 1 MiB with
+`F_SETPIPE_SZ` to widen that window, and `output` defaults to `console` so that
+a machine with no `oxlogd` is never in this state by accident.
+
+**PID 1 is the server.** `oxlogd` connects to `/run/oxinit/log.sock`,
+`SOCK_SEQPACKET`, mode `0600`. PID 1 already owns a listening socket and an
+event loop; the other direction would have PID 1 connecting to a service it
+supervises, at every service start, and deciding what to do when that connect
+fails. One shipper at a time: a second connection is refused rather than
+racing the first for the same descriptors.
+
+The message is the unit name, as bytes, with the read end attached as
+`SCM_RIGHTS`. `SOCK_SEQPACKET` puts the name and the descriptor in the same
+message with no framing, and the name is the only field there is — encoding one
+string through a serializer would be ceremony around a `send`.
+
+**One pipe per start, not per unit.** A restarted service gets a new pipe;
+`oxlogd` sees EOF on the old descriptor, closes it, and is handed the new one.
+The alternative — reusing a pipe across restarts — would mean the descriptor
+outliving the process it was made for, and no EOF to say a service had gone.
+
+**`stdout` and `stderr` share it.** The order in which a service wrote to its
+two streams is information, and two pipes would destroy it: they would be read
+independently and interleaved by whichever the reader reached first.
+
+**Records are `<seconds>.<microseconds> <line>`.** No date formatting, so no
+dependency for it, and the result sorts and greps as text. Rendering it as a
+date is the reader's job. Lines are split by `oxlogd`, which buffers a partial
+read until a newline arrives — bounded, because a service that writes a
+megabyte without one must not grow `oxlogd`'s buffer to match.
+
+**Rotation is by size.** At `max-size` the file is renamed `<unit>.log.1`, the
+older generations shift down, and the oldest is dropped. Bounded disk per unit
+is the property that matters; a time-based policy bounds nothing.
+
+**`oxctl logs` reads the files.** It does not go through the control socket:
+that is the one socket that has to stay responsive, and bulk data is exactly
+what would stop it being. The path and the record format live in
+`oxinit-log`, shared by all three programs, so there is one definition of
+where a log is and what a line in it looks like.
+
+**`oxlogd` uses `poll`, not `epoll`.** It watches a handful of descriptors and
+the set changes on nearly every event — a service starts and one is added, a
+service exits and one is dropped. That is the case `poll` is better at:
+`epoll`'s advantage is a stable set of many descriptors amortising the
+registration calls, and there is neither here. It is also not PID 1, so the
+rules in [Concurrency](#concurrency) are guidance rather than law; it happens
+to follow them because the same reasoning applies.
+
 ## IPC
 
 `oxctl` connects to `/run/oxinit/control.sock` and exchanges request/response
@@ -726,12 +802,14 @@ oxinit/
 ├─ crates/
 │  ├─ oxinit/            # PID 1 binary
 │  ├─ oxctl/             # CLI client
+│  ├─ oxlogd/            # log writer
 │  ├─ oxinit-unit/       # unit parsing + validation
 │  ├─ oxinit-graph/      # dependency resolution
 │  ├─ oxinit-service/    # service state machine, restart policy
 │  ├─ oxinit-cgroup/     # cgroup v2
 │  ├─ oxinit-user/       # /etc/passwd and /etc/group
 │  ├─ oxinit-ipc/        # control protocol types
+│  ├─ oxinit-log/        # record format, rotation policy, paths
 │  ├─ notify-probe/      # test fixture: a service that speaks sd_notify
 │  ├─ listen-probe/      # test fixture: a socket-activated service
 │  └─ xtask/             # build and boot automation
@@ -757,6 +835,10 @@ tested without a kernel should not be in it.
 - `oxinit-user` is text parsing. Getting a uid wrong is a privilege bug, so the
   parsing is separated from the `setuid` that consumes it and tested on its
   own.
+- `oxinit-log` is where a log line is decided to be a log line: splitting a
+  read into records, bounding one that never ends, and choosing when to rotate.
+  All three programs agree on it because all three depend on it, and none of it
+  needs a descriptor to test.
 
 ## Development loop
 
