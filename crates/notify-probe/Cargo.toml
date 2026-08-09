@@ -9,4 +9,9 @@ repository.workspace = true
 publish.workspace = true
 
 # A test fixture, not PID 1. The rules on the oxinit crate do not apply.
+#
+# libc is here for one call: `signal(SIGTERM, SIG_IGN)`, so the fixture can
+# play a service that refuses to stop and make oxinit escalate to cgroup.kill.
+# std has no way to ignore a signal.
 [dependencies]
+libc.workspace = true

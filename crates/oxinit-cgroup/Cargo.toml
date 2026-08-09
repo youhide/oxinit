@@ -1,0 +1,18 @@
+[package]
+name = "oxinit-cgroup"
+version = "0.0.0"
+description = "cgroup v2 hierarchy, limits, accounting, and emptiness"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# std::fs and nothing else. A cgroup is a directory of text files, so every
+# path, every value written, and every value parsed back is exercised on the
+# host against a temporary directory. What needs a real kernel — the EPOLLPRI
+# registration on cgroup.events, and the pre_exec write to cgroup.procs — is
+# the part that stays in the `oxinit` binary.
+[dependencies]
+oxinit-unit = { path = "../oxinit-unit" }
+thiserror.workspace = true

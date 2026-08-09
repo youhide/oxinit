@@ -1,0 +1,13 @@
+# Runs as someone other than root. setgroups, setgid and setuid happen between
+# fork and exec, in the same hook that writes cgroup.procs — and after it,
+# because that write needs the privilege being dropped.
+#
+# `id` should print uid=65534(nobody) and the supplementary group from
+# /etc/group, not just the primary one.
+[unit]
+description = "Drops privilege before exec"
+
+[service]
+type = "oneshot"
+exec = "/bin/id"
+user = "nobody"

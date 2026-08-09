@@ -107,21 +107,65 @@ Verified under QEMU:
 
 ## M3 — cgroup v2
 
-**Next.**
+**Done.**
 
-- [ ] Hierarchy under `/sys/fs/cgroup/oxinit.slice/<name>.service/`.
-- [ ] Write the pid to `cgroup.procs` between `fork` and `exec`.
-- [ ] `memory-max` → `memory.max`, `tasks-max` → `pids.max`.
-- [ ] Read `memory.current` and `pids.current` for status output.
-- [ ] `cgroup.events` registered with `EPOLLPRI`; track the `populated` key.
-- [ ] `type = "forking"` readiness, using `populated`.
-- [ ] `cgroup.kill` on stop, after `SIGTERM` and the stop timeout.
-- [ ] Apply `user` in the same `pre_exec` hook as cgroup placement: setgid,
+- [x] Hierarchy under `/sys/fs/cgroup/oxinit.slice/<name>.service/`.
+- [x] Write the pid to `cgroup.procs` between `fork` and `exec`.
+- [x] `memory-max` → `memory.max`, `tasks-max` → `pids.max`.
+- [x] Read `memory.current` and `pids.current` for status output.
+- [x] `cgroup.events` registered with `EPOLLPRI`; track the `populated` key.
+- [x] `type = "forking"` readiness, using `populated`.
+- [x] `cgroup.kill` on stop, after `SIGTERM` and the stop timeout.
+- [x] Apply `user` in the same `pre_exec` hook as cgroup placement: setgid,
       initgroups, setuid, in that order.
+
+Two crates, both host-tested without a VM. `oxinit-cgroup` is `std::fs` and
+nothing more, because a cgroup is a directory of text files; `oxinit-user`
+parses `/etc/passwd` and `/etc/group`, deliberately not `getpwnam`, which
+resolves through NSS and would put `dlopen` and arbitrary third-party code
+inside PID 1.
+
+`stop-sec` is new in the unit format: the grace period between `SIGTERM` and
+`cgroup.kill`. A unit is `Deactivating` until its cgroup empties, not until its
+main process exits, and one that had to be killed ends `Failed` rather than
+`Inactive`.
+
+Fixed on the way: children inherited PID 1's full signal block mask. The
+standard library's own reset runs before `pre_exec` and is not part of
+`Command`'s contract, and a service that starts with `SIGTERM` blocked cannot
+be stopped at all — every stop would have escalated to `cgroup.kill`. oxinit
+now resets the mask itself, first thing in its own hook. ARCHITECTURE.md always
+required this; nothing had tested it, because M2's watchdog used `SIGKILL`.
+
+Verified under QEMU:
+
+- `memory.max` reads back `16777216` and `pids.max` reads back `8` for a unit
+  declaring `memory-max = "16M"` and `tasks-max = 8`, and the root's
+  `cgroup.subtree_control` reads back `memory pids`.
+- A service's `cgroup.procs` holds its pid, so placement happened before
+  `exec`, not after it.
+- A `forking` unit's `cgroup.procs` holds the pid of the process left behind,
+  not the one oxinit forked, and the unit reaches `Active` on that basis. When
+  that process later exits, the empty cgroup is what reports the unit gone, and
+  the restart policy applies.
+- A `oneshot` running `/bin/id` as `user = "nobody"` prints
+  `uid=65534(nobody) gid=65534(nogroup) groups=100(oxinit),65534(nogroup)` —
+  supplementary groups included, not just the primary one.
+- `memory.current` and `pids.current` are reported when a unit comes up.
+- A child's `/proc/self/status` shows `SigBlk: 0000000000000000`.
+- A hung service is sent `SIGTERM` and is gone before its `stop-sec` expires.
+  One that ignores `SIGTERM` outlives it, gets `cgroup.kill`, and lands in
+  `Failed`.
+
+99 host tests across the five library crates, no VM needed.
+
+Deferred out of M3: nothing from the list above. The `Requested` stop cause
+exists and is tested, but has no caller until `oxctl` in M5 — there is no way
+to ask for a stop yet.
 
 ## M4 — Socket activation
 
-**Not started.**
+**Next.**
 
 - [ ] Socket units: create, bind, and listen before the service starts.
 - [ ] Pass descriptors starting at fd 3, clearing `FD_CLOEXEC`.

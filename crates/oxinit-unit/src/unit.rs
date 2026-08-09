@@ -12,6 +12,9 @@ use crate::value::{DurationValue, SizeValue};
 /// Default delay before a restart, before backoff scales it.
 const DEFAULT_RESTART_SEC: Duration = Duration::from_millis(100);
 
+/// Default grace period between `SIGTERM` and `cgroup.kill`.
+const DEFAULT_STOP_SEC: Duration = Duration::from_secs(30);
+
 /// A parsed, validated unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unit {
@@ -46,6 +49,8 @@ pub struct Service {
     pub exec: Vec<String>,
     pub restart: Restart,
     pub restart_sec: Duration,
+    /// How long the service has between `SIGTERM` and `cgroup.kill`.
+    pub stop_sec: Duration,
     /// How long the service may go without a `WATCHDOG=1` ping. `None`
     /// disables the watchdog.
     pub watchdog_sec: Option<Duration>,
@@ -135,6 +140,7 @@ struct RawService {
     exec: String,
     restart: Option<Restart>,
     restart_sec: Option<DurationValue>,
+    stop_sec: Option<DurationValue>,
     watchdog_sec: Option<DurationValue>,
     user: Option<String>,
 }
@@ -217,6 +223,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 restart_sec: service
                     .restart_sec
                     .map_or(DEFAULT_RESTART_SEC, |value| value.0),
+                stop_sec: service.stop_sec.map_or(DEFAULT_STOP_SEC, |value| value.0),
                 watchdog_sec,
                 user,
                 resources: match raw.resources {
@@ -291,6 +298,7 @@ type        = "notify"
 exec        = "/usr/sbin/sshd -D"
 restart     = "on-failure"
 restart-sec = "5s"
+stop-sec    = "20s"
 user        = "root"
 
 [resources]
@@ -317,6 +325,7 @@ tasks-max  = 512
         assert_eq!(service.exec, ["/usr/sbin/sshd", "-D"]);
         assert_eq!(service.restart, Restart::OnFailure);
         assert_eq!(service.restart_sec, Duration::from_secs(5));
+        assert_eq!(service.stop_sec, Duration::from_secs(20));
         assert_eq!(service.user, "root");
         assert_eq!(
             service.resources.memory_max,
@@ -348,6 +357,7 @@ tasks-max  = 512
         assert_eq!(service.ty, ServiceType::Simple);
         assert_eq!(service.restart, Restart::No);
         assert_eq!(service.restart_sec, DEFAULT_RESTART_SEC);
+        assert_eq!(service.stop_sec, DEFAULT_STOP_SEC);
         assert_eq!(service.watchdog_sec, None, "watchdog is off by default");
         assert_eq!(service.user, "root");
         assert_eq!(service.resources, Resources::default());

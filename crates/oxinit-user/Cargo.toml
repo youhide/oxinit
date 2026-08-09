@@ -1,0 +1,17 @@
+[package]
+name = "oxinit-user"
+version = "0.0.0"
+description = "Resolving a username against /etc/passwd and /etc/group"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Text parsing, not syscalls. Getting a uid wrong is a privilege bug, so the
+# parsing is separated from the `setuid` call that consumes it and tested on
+# the host. Deliberately not `libc::getpwnam`: that resolves through NSS, which
+# means dlopen, which means arbitrary code and unbounded latency inside PID 1
+# — and none of it is testable without the machine's real user database.
+[dependencies]
+thiserror.workspace = true

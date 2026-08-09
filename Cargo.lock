@@ -42,16 +42,29 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "notify-probe"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "oxinit"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "oxinit-cgroup",
  "oxinit-graph",
  "oxinit-service",
  "oxinit-unit",
+ "oxinit-user",
  "rustix",
+ "thiserror",
+]
+
+[[package]]
+name = "oxinit-cgroup"
+version = "0.0.0"
+dependencies = [
+ "oxinit-unit",
  "thiserror",
 ]
 
@@ -76,6 +89,13 @@ version = "0.0.0"
 dependencies = [
  "basic-toml",
  "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "oxinit-user"
+version = "0.0.0"
+dependencies = [
  "thiserror",
 ]
 

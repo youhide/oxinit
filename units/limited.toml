@@ -1,0 +1,12 @@
+# Capped. The limits must land in memory.max and pids.max, and oxinit must
+# read memory.current and pids.current back when the unit comes up.
+[unit]
+description = "Runs under a memory and task cap"
+
+[service]
+exec    = "/bin/sleep 600"
+restart = "no"
+
+[resources]
+memory-max = "16M"
+tasks-max  = 8

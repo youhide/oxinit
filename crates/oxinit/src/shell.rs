@@ -8,14 +8,20 @@
 use std::process::{Child, Command};
 
 use crate::error::{Error, Result};
+use crate::sys::raw::{setup_child, ChildSetup};
 
 pub const SHELL: &str = "/bin/sh";
 
 pub fn spawn() -> Result<Child> {
-    // std resets the child's signal mask to empty between fork and exec. That
-    // matters here: oxinit blocks every signal, and a child that inherited a
-    // full block mask would be unable to be interrupted or killed normally.
-    Command::new(SHELL).spawn().map_err(|source| Error::Spawn {
+    let mut command = Command::new(SHELL);
+
+    // For the signal mask reset, which oxinit does itself. A recovery shell
+    // that inherited PID 1's full block mask could not be interrupted, could
+    // not be suspended, and would pass that mask on to everything an operator
+    // ran from it.
+    setup_child(&mut command, ChildSetup::default());
+
+    command.spawn().map_err(|source| Error::Spawn {
         path: SHELL,
         source,
     })

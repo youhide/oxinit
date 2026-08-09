@@ -76,6 +76,20 @@ impl Exit {
     }
 }
 
+/// Why a unit is being stopped.
+///
+/// It is not bookkeeping: it decides what happens when the cgroup finally
+/// empties. An operator's stop overrides the restart policy, and a watchdog
+/// kill deliberately does not — the whole point of a watchdog is to turn a
+/// hang into something the restart policy can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCause {
+    /// Asked for, by `oxctl`, a `conflicts`, or shutdown. No restart.
+    Requested,
+    /// The watchdog deadline was missed. Treated exactly like a crash.
+    Watchdog,
+}
+
 impl fmt::Display for Exit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -101,6 +115,10 @@ pub struct Instance {
     pub status: Option<String>,
     /// Last `WATCHDOG=1`. `None` when the service never pinged.
     pub last_ping: Option<Instant>,
+    /// Set while `Deactivating`. Decides the outcome once the cgroup empties.
+    stop_cause: Option<StopCause>,
+    /// Whether the stop timeout expired and `cgroup.kill` was used.
+    killed: bool,
 }
 
 impl Instance {
@@ -118,6 +136,8 @@ impl Instance {
             active_since: None,
             status: None,
             last_ping: None,
+            stop_cause: None,
+            killed: false,
         }
     }
 
@@ -154,6 +174,17 @@ impl Instance {
         self.last_ping = Some(Instant::now());
     }
 
+    /// A `forking` service's initial process exited and left its cgroup
+    /// populated.
+    ///
+    /// That is this type's readiness condition, so the unit is `Active` — but
+    /// with no process oxinit forked left to watch. From here the cgroup is
+    /// the only thing that knows whether the service is still running.
+    pub fn forked_away(&mut self) {
+        self.child = None;
+        self.entered_active();
+    }
+
     /// A `WATCHDOG=1` ping.
     pub fn pinged(&mut self) {
         self.last_ping = Some(Instant::now());
@@ -164,12 +195,65 @@ impl Instance {
         self.state == State::Active && self.last_ping.is_some_and(|last| last.elapsed() > interval)
     }
 
+    /// `SIGTERM` has been sent; the unit is waiting for its cgroup to empty
+    /// or for the stop timeout to expire.
+    pub fn entered_deactivating(&mut self, cause: StopCause) {
+        self.stop_cause = Some(cause);
+        self.killed = false;
+        self.state = State::Deactivating;
+    }
+
+    /// The stop timeout expired and `cgroup.kill` was used.
+    pub fn stop_timed_out(&mut self) {
+        self.killed = true;
+    }
+
+    /// The cgroup emptied, which ends a stop.
+    ///
+    /// Returns the backoff delay when a restart applies — which it does only
+    /// for a watchdog kill. Nothing else that reaches here restarts.
+    pub fn deactivated(&mut self) -> Option<Duration> {
+        self.child = None;
+        let killed = std::mem::take(&mut self.killed);
+
+        match self.stop_cause.take() {
+            // The unit failed; the policy decides, exactly as for a crash.
+            Some(StopCause::Watchdog) => self.schedule_restart(Exit::Abnormal),
+
+            // An explicit stop overrides the restart policy. Having had to
+            // reach for cgroup.kill is still a failure, and is reported as
+            // one — the unit did not stop when it was asked to.
+            Some(StopCause::Requested) | None => {
+                self.active_since = None;
+                self.status = None;
+                self.state = if killed {
+                    State::Failed
+                } else {
+                    State::Inactive
+                };
+                None
+            }
+        }
+    }
+
     /// Decide what happens after the main process exits.
     ///
     /// Returns the backoff delay when a restart applies.
     pub fn on_exit(&mut self, exit: Exit) -> Option<Duration> {
         self.child = None;
 
+        // Mid-stop, the exit of the main process is not the end of the unit:
+        // the cgroup may still hold children it forked. `deactivated` owns
+        // the transition, and the cgroup emptying is what triggers it.
+        if self.state == State::Deactivating {
+            return None;
+        }
+
+        self.schedule_restart(exit)
+    }
+
+    /// Apply the restart policy to a unit that has stopped running.
+    fn schedule_restart(&mut self, exit: Exit) -> Option<Duration> {
         // A service that stayed up longer than its own backoff is working;
         // forget the failure history. Without this a service failing once a
         // day would eventually take the full cap to come back.
@@ -198,14 +282,6 @@ impl Instance {
         self.state = State::Restarting;
 
         Some(delay)
-    }
-
-    /// An explicit stop overrides the restart policy.
-    pub fn stopped(&mut self) {
-        self.child = None;
-        self.active_since = None;
-        self.status = None;
-        self.state = State::Inactive;
     }
 }
 
@@ -335,6 +411,82 @@ mod tests {
             instance.on_exit(Exit::Code(1)),
             Some(Duration::from_secs(20))
         );
+    }
+
+    #[test]
+    fn an_explicit_stop_overrides_the_restart_policy() {
+        let mut instance = Instance::new(unit("always", "1s"));
+        instance.entered_active();
+
+        instance.entered_deactivating(StopCause::Requested);
+        assert_eq!(instance.state, State::Deactivating);
+
+        // The main process exiting mid-stop does not end the unit: its cgroup
+        // may still hold children, and it must not restart either.
+        assert_eq!(instance.on_exit(Exit::Abnormal), None);
+        assert_eq!(instance.state, State::Deactivating);
+
+        assert_eq!(instance.deactivated(), None);
+        assert_eq!(instance.state, State::Inactive);
+        assert_eq!(instance.restarts, 0);
+    }
+
+    #[test]
+    fn a_stop_that_needed_cgroup_kill_is_a_failure() {
+        let mut instance = Instance::new(unit("no", "1s"));
+        instance.entered_active();
+        instance.entered_deactivating(StopCause::Requested);
+
+        // SIGTERM was ignored and the stop timeout expired.
+        instance.stop_timed_out();
+
+        assert_eq!(instance.deactivated(), None, "still no restart");
+        assert_eq!(
+            instance.state,
+            State::Failed,
+            "a unit that had to be killed did not stop when it was asked to"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_kill_still_restarts() {
+        let mut instance = Instance::new(unit("on-failure", "1s"));
+        instance.entered_active();
+
+        instance.entered_deactivating(StopCause::Watchdog);
+        instance.on_exit(Exit::Abnormal);
+        instance.stop_timed_out();
+
+        // The point of a watchdog is to turn a hang into a failure the
+        // restart policy acts on.
+        assert_eq!(instance.deactivated(), Some(Duration::from_secs(1)));
+        assert_eq!(instance.state, State::Restarting);
+        assert_eq!(instance.restarts, 1);
+    }
+
+    #[test]
+    fn a_watchdog_kill_on_a_unit_that_never_restarts_is_failed() {
+        let mut instance = Instance::new(unit("no", "1s"));
+        instance.entered_active();
+        instance.entered_deactivating(StopCause::Watchdog);
+
+        assert_eq!(instance.deactivated(), None);
+        assert_eq!(instance.state, State::Failed);
+    }
+
+    #[test]
+    fn the_kill_flag_does_not_survive_the_next_stop() {
+        let mut instance = Instance::new(unit("no", "1s"));
+
+        instance.entered_deactivating(StopCause::Requested);
+        instance.stop_timed_out();
+        instance.deactivated();
+        assert_eq!(instance.state, State::Failed);
+
+        // A later, well-behaved stop must not inherit the earlier failure.
+        instance.entered_deactivating(StopCause::Requested);
+        instance.deactivated();
+        assert_eq!(instance.state, State::Inactive);
     }
 
     #[test]

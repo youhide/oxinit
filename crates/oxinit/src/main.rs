@@ -24,6 +24,7 @@ compile_error!(
      or use `cargo xtask boot`. See CONTRIBUTING.md."
 );
 
+mod cgroup;
 mod console;
 mod error;
 mod event;
@@ -113,7 +114,19 @@ fn boot() -> ! {
         }
     };
 
-    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify);
+    // Without a cgroup hierarchy the machine still boots. It loses process
+    // tracking, resource limits, `forking` readiness, and `cgroup.kill`, and
+    // says so where each is asked for — which beats refusing to start.
+    let cgroups = match cgroup::Cgroups::open(oxinit_cgroup::CGROUP_ROOT) {
+        Ok(cgroups) => cgroups,
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            eprintln!("oxinit: continuing without cgroups");
+            cgroup::Cgroups::unavailable()
+        }
+    };
+
+    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify, cgroups);
 
     let registered = events
         .register(&signals, event::Source::Signals)
@@ -123,6 +136,15 @@ fn boot() -> ! {
     if let Err(e) = registered {
         eprintln!("oxinit: {e}");
         fallback(Some(&signals));
+    }
+
+    // Every service cgroup, registered once and never touched again. The
+    // hierarchy is built before anything starts precisely so this is one pass
+    // rather than an epoll call on every start and stop.
+    for (id, fd) in supervisor.cgroups.events() {
+        if let Err(e) = events.register_pri(fd, event::Source::Cgroup(id)) {
+            eprintln!("oxinit: {e}");
+        }
     }
 
     // With nothing to supervise, keep the machine usable the way M0 did.
@@ -164,6 +186,7 @@ fn run(
                 event::Source::Signals => on_signals(signals, supervisor, shell, &mut pending),
                 event::Source::Timer => supervisor.on_timer(),
                 event::Source::Notify => supervisor.on_notify(),
+                event::Source::Cgroup(id) => supervisor.on_cgroup(*id),
             }));
 
             if result.is_err() {
