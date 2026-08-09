@@ -1,0 +1,21 @@
+[package]
+name = "oxlogd"
+version = "0.0.0"
+description = "Reads service output and writes it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Not PID 1. This process may panic and may exit, and oxinit's restart policy
+# is what brings it back — which is the whole point of it being a separate
+# process. It still avoids both, because a log writer that dies loses whatever
+# was in the pipe.
+#
+# rustix for poll, recvmsg and the descriptors; oxinit-log for the format, the
+# paths and the rotation policy, which oxinit and oxctl read from the same
+# place.
+[dependencies]
+oxinit-log = { path = "../oxinit-log" }
+rustix = { workspace = true, features = ["event", "fs", "net"] }

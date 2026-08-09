@@ -100,6 +100,8 @@ pub struct Service {
     /// the units take the terminal from each other, which is why it is
     /// declared rather than inferred from stdin happening to be a tty.
     pub tty: bool,
+    /// Where the service's standard output and error go.
+    pub output: Output,
     pub resources: Resources,
 }
 
@@ -111,6 +113,29 @@ pub enum ServiceType {
     Forking,
     Oneshot,
     Notify,
+}
+
+/// Where a service's `stdout` and `stderr` go.
+///
+/// They share one destination, and for `log` one pipe. The order in which a
+/// service wrote to its two streams is information, and two pipes would
+/// destroy it — they would be read independently and interleaved by whichever
+/// the reader reached first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Output {
+    /// The descriptors oxinit itself has: the console on a machine, the
+    /// runtime's pipes in a container.
+    ///
+    /// The default, and deliberately not `log`. oxinit does not move a
+    /// service's output somewhere the operator did not ask for, and on an
+    /// image with no `oxlogd` a `log` default would be a pipe with no reader.
+    #[default]
+    Console,
+    /// A pipe to `oxlogd`, which writes `/var/log/oxinit/<unit>.log`.
+    Log,
+    /// `/dev/null`.
+    Null,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -197,6 +222,7 @@ struct RawService {
     watchdog_sec: Option<DurationValue>,
     user: Option<String>,
     tty: Option<bool>,
+    output: Option<Output>,
 }
 
 /// Targets take no keys. The section's presence is the whole of it.
@@ -310,6 +336,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 watchdog_sec,
                 user,
                 tty: service.tty.unwrap_or(false),
+                output: service.output.unwrap_or_default(),
                 resources: match raw.resources {
                     Some(res) => Resources {
                         memory_max: res.memory_max,
@@ -461,6 +488,22 @@ tasks-max  = 512
     }
 
     #[test]
+    fn output_is_opt_in() {
+        let unit = parse_ok("x", "[service]\nexec = \"/bin/true\"\noutput = \"log\"\n");
+        assert_eq!(unit.service().unwrap().output, Output::Log);
+
+        assert!(
+            parse(
+                "x",
+                "[service]\nexec = \"/bin/true\"\noutput = \"journal\"\n",
+                "h"
+            )
+            .is_err(),
+            "an unknown destination is a load error, not a silent console"
+        );
+    }
+
+    #[test]
     fn watchdog_requires_type_notify() {
         let ok = "[service]\ntype = \"notify\"\nexec = \"/bin/true\"\nwatchdog-sec = \"30s\"\n";
         let unit = parse_ok("x", ok);
@@ -487,6 +530,11 @@ tasks-max  = 512
         assert_eq!(service.watchdog_sec, None, "watchdog is off by default");
         assert_eq!(service.user, "root");
         assert!(!service.tty, "no controlling terminal by default");
+        assert_eq!(
+            service.output,
+            Output::Console,
+            "output is not moved anywhere the operator did not ask for"
+        );
         assert_eq!(service.resources, Resources::default());
         assert_eq!(unit.deps, Deps::default());
     }

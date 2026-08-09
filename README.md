@@ -124,6 +124,38 @@ immediate and says what was *asked for*, not what has finished: a stop ends
 when the unit's cgroup empties, and the one socket that has to stay responsive
 does not wait on the slowest thing on the machine.
 
+## Logs
+
+A service declaring `output = "log"` writes into a pipe rather than onto the
+console, and `oxlogd` turns that into `/var/log/oxinit/<unit>.log`:
+
+```
+$ oxctl logs chatty
+1786287692.803983 chatty-out
+1786287692.812454 chatty-err
+1786287692.812548 chatty-last
+```
+
+`stdout` and `stderr` share the pipe, so the order the service wrote them in
+survives. The timestamp is seconds and microseconds since the epoch, padded so
+the files sort as text — rendering it as a date is the reader's job, and not
+having a calendar in a log writer is worth more than pretty output. Rotation
+is by size, because bounded disk per unit is the property that matters.
+
+**PID 1 reads none of it.** It makes the pipe, gives the write end to the
+child, and passes the read end to `oxlogd` over a unix socket. A service
+writing a megabyte a second cannot make PID 1 do work, and a bug in a log
+writer kills a log writer.
+
+oxinit keeps its own copy of every read end, which is what makes an `oxlogd`
+restart invisible: the pipes are never closed, the services writing into them
+notice nothing, and the replacement is handed every descriptor again when it
+connects.
+
+`oxctl logs` reads the file directly rather than asking PID 1 for it. The
+control socket has to stay responsive, and bulk data is what would stop it
+being.
+
 ## Shutdown
 
 `SIGTERM` stops every unit in the reverse of its start order, waits for each
@@ -146,7 +178,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 6 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 7 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -158,15 +190,15 @@ container's PID 1.
 | **M4** | Socket activation: `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES`. |
 | **M5** | Ordered shutdown, the signal table, the control socket, `oxctl`. |
 | **M6** | Containers, and a console with a controlling terminal. |
+| **M7** | Logs: a pipe per service, `oxlogd`, rotation, `oxctl logs`. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Logs are next, and are the largest thing a service manager is expected to do
-that oxinit does not: a service's output goes wherever PID 1's went.
-[ROADMAP.md](ROADMAP.md) has the breakdown, including what each milestone was
-verified against and what was deferred out of it.
+Nothing is scheduled after M7. [ROADMAP.md](ROADMAP.md) has the breakdown,
+including what each milestone was verified against and what was deferred out
+of it.
 
 ## Running it
 

@@ -156,6 +156,22 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("got \"echo: hello\"", "M4: an activated service answered"),
     (
+        "oxinit: logs: shipper connected",
+        "M7: oxlogd took the log socket",
+    ),
+    (
+        "chatty.log: seen-out",
+        "M7: a service's stdout landed in its own file, timestamped",
+    ),
+    (
+        "chatty.log: seen-err",
+        "M7: and its stderr, in the order it was written",
+    ),
+    (
+        "chatty.log: seen-last",
+        "M7: including the last line before it exited",
+    ),
+    (
         "oxinit: shutting down to power off",
         "M5: SIGTERM is handled",
     ),
@@ -173,7 +189,11 @@ const EXPECTED: &[(&str, &str)] = &[
 /// terminal, which is what `tty = true` on the console unit exists to prevent.
 /// It is asserted as an absence because there is no line to assert on when it
 /// works — a shell with job control simply does not mention it.
-const FORBIDDEN: &[&str] = &["panicked", "Kernel panic", "can't access tty"];
+/// "chatty-out" is the other half of the log assertions. The `logged` unit
+/// rewrites it to "seen-out" as it reads it back out of the file, so the
+/// original token reaching the serial log at all means a service that declared
+/// `output = "log"` wrote to the console instead.
+const FORBIDDEN: &[&str] = &["panicked", "Kernel panic", "can't access tty", "chatty-out"];
 
 /// Hard limit on the whole boot. A test that hangs has to fail, not block.
 const TEST_TIMEOUT: u32 = 90;
@@ -314,6 +334,10 @@ const EXPECTED_CONTAINER: &[(&str, &str)] = &[
         "power off: exiting with status 0",
         "M6: exiting, rather than a reboot(2) that is not oxinit's to do",
     ),
+    (
+        "oxinit: logs: shipper connected",
+        "M7: oxlogd took the log socket",
+    ),
 ];
 
 /// Additionally, when the container has the capabilities and a writable
@@ -409,6 +433,12 @@ fn drive(engine: &str, privileged: bool) -> Result<(), String> {
         failures.push(format!("the container never logged `{BOOTED}`"));
     }
 
+    // The claim M7 rests on: oxinit holds the read end of every pipe, so a
+    // restarted oxlogd is handed them all again and a service writing into one
+    // never notices. Killing the shipper and watching a live file keep growing
+    // is the only way to tell that from a design that merely looks right.
+    failures.extend(survives_a_shipper_restart(engine)?);
+
     println!("xtask: asking {engine} to stop it");
     let started = std::time::Instant::now();
     run(Command::new(engine)
@@ -435,6 +465,72 @@ fn drive(engine: &str, privileged: bool) -> Result<(), String> {
     }
 
     check(&logs(engine)?, &expected, FORBIDDEN_CONTAINER, failures)
+}
+
+/// Restart `oxlogd` under a running `ticker` and check the log keeps growing.
+///
+/// Returns what went wrong, if anything, rather than failing early: a
+/// container that is still up has more to say, and the caller reports it all
+/// at once.
+fn survives_a_shipper_restart(engine: &str) -> Result<Vec<String>, String> {
+    const TICKER: &str = "/var/log/oxinit/ticker.log";
+
+    let count = |engine: &str| -> Result<usize, String> {
+        let out = exec(
+            engine,
+            &["/bin/sh", "-c", &format!("/bin/wc -l < {TICKER}")],
+        )?;
+        out.trim()
+            .parse()
+            .map_err(|_| format!("`wc -l < {TICKER}` said `{}`", out.trim()))
+    };
+
+    let before = count(engine)?;
+    if before == 0 {
+        return Ok(vec![format!(
+            "{TICKER} was empty before the restart, so the rest proves nothing"
+        )]);
+    }
+
+    println!("xtask: restarting oxlogd under a running ticker ({before} lines so far)");
+    exec(engine, &["/bin/oxctl", "restart", "oxlogd"])?;
+
+    // Long enough for the stop, the restart backoff, the reconnect, and a few
+    // more ticks. Nothing here is instantaneous and none of it is worth a
+    // polling loop.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    let after = count(engine)?;
+    println!("xtask: {after} lines after it came back");
+
+    if after <= before {
+        return Ok(vec![format!(
+            "{TICKER} stopped at {before} lines across an oxlogd restart; \
+             the descriptor was not handed to the replacement"
+        )]);
+    }
+
+    Ok(Vec::new())
+}
+
+/// Run something inside the container and return its standard output.
+fn exec(engine: &str, argv: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(engine);
+    command.args(["exec", CONTAINER_NAME]).args(argv);
+
+    let out = command
+        .output()
+        .map_err(|e| format!("run {engine} exec: {e}"))?;
+
+    if !out.status.success() {
+        return Err(format!(
+            "{engine} exec {}: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Poll the log until `needle` shows up. `false` on timeout.
@@ -559,9 +655,11 @@ fn stage(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, Str
         ),
     }
 
-    // The client. Part of the system, unlike the fixtures below.
-    if let Ok(binary) = build_package("oxctl") {
-        install(&binary, &staging.join("bin/oxctl"))?;
+    // The client and the log writer. Part of the system, unlike the fixtures
+    // below.
+    for program in ["oxctl", "oxlogd"] {
+        let binary = build_package(program)?;
+        install(&binary, &staging.join("bin").join(program))?;
     }
 
     // Test fixtures. Only useful in a test image, and only there because
@@ -610,7 +708,7 @@ fn stage(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, Str
 /// not exist and the shell can only run its own builtins.
 const APPLETS: &[&str] = &[
     "cat", "ls", "ps", "sleep", "mount", "umount", "hostname", "grep", "poweroff", "reboot",
-    "dmesg", "kill", "mkdir", "echo", "true", "false", "date", "id",
+    "dmesg", "kill", "mkdir", "echo", "true", "false", "date", "id", "sed", "wc",
 ];
 
 /// Whether to treat this binary as busybox, by filename.

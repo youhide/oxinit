@@ -8,9 +8,11 @@ members = [
     "crates/oxinit-cgroup",
     "crates/oxinit-graph",
     "crates/oxinit-ipc",
+    "crates/oxinit-log",
     "crates/oxinit-service",
     "crates/oxinit-unit",
     "crates/oxinit-user",
+    "crates/oxlogd",
     "crates/xtask",
 ]
 

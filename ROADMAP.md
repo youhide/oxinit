@@ -393,22 +393,22 @@ next question and nothing needs it yet.
 
 ## M7 — Logs
 
-**Next.**
+**Done.**
 
 A service's output goes wherever PID 1's happened to go. Every unit on the
 machine writes to one console, nothing says which unit a line came from, and
 nothing keeps any of it. It is the largest thing a service manager is expected
 to do that oxinit does not.
 
-- [ ] `oxinit-log`: record format, line splitting, rotation policy, paths.
+- [x] `oxinit-log`: record format, line splitting, rotation policy, paths.
       Host-tested, no syscalls.
-- [ ] `oxlogd`: a separate process that reads service output and writes it.
-- [ ] One pipe per service start. The write end goes to the child; the read
+- [x] `oxlogd`: a separate process that reads service output and writes it.
+- [x] One pipe per service start. The write end goes to the child; the read
       end is passed to `oxlogd` over a unix socket with `SCM_RIGHTS`.
-- [ ] `output` in `[service]`: `console`, `log`, `null`.
-- [ ] Size-based rotation, bounded on disk.
-- [ ] `oxctl logs <unit>`.
-- [ ] `test-boot` and `container` assert a service's output landed in its own
+- [x] `output` in `[service]`: `console`, `log`, `null`.
+- [x] Size-based rotation, bounded on disk.
+- [x] `oxctl logs <unit>`.
+- [x] `test-boot` and `container` assert a service's output landed in its own
       file, and that the console no longer carries it.
 
 **PID 1 reads no service output.** It creates the pipe, gives the write end to
@@ -441,6 +441,36 @@ read independently and interleaved by whichever the reader got to first.
 **Logs are files, and `oxctl logs` reads them.** Not proxied through the
 control socket: that is the one socket that has to stay responsive, and bulk
 data is exactly what would stop it being.
+
+A bug this milestone found in M5's: `oxctl restart` never restarted a unit
+that was running. It scheduled an alarm that only acted on a unit in
+`Restarting`, and a requested stop ends `Inactive` — precisely because
+requesting a stop is what stops the restart policy applying. An explicit
+restart is now remembered rather than timed, and started by the same event
+that ends the stop. Nothing had tested it: M5 verified `oxctl stop`, and the
+restart path was reached for the first time by M7 restarting `oxlogd` on
+purpose.
+
+Verified under QEMU and in a container:
+
+- A service declaring `output = "log"` has its stdout, its stderr and its last
+  line-without-a-newline in `/var/log/oxinit/chatty.log`, timestamped, in the
+  order it wrote them — and `chatty-out` appears nowhere on the console, which
+  the boot suite asserts as an absence.
+- `oxctl logs` reads that file back. The assertion strips the record's
+  timestamp with a pattern, so a format that lost it fails here too.
+- **A restart of `oxlogd` is invisible to what it was shipping.** A service
+  writing a line a second is at 1 line when `oxctl restart oxlogd` runs and at
+  6 five seconds later: oxinit still held the read end and handed it to the
+  replacement.
+
+128 host tests across eight library crates.
+
+Deferred out of M7: `oxctl logs -f`, and reading the rotated generations.
+Following a file that a second process is appending to is a different program
+from printing one, and `<unit>.log.1` and up are in the same directory in the
+same format — reading them is `cat`, which is most of the reason the format is
+plain text.
 
 ## Beyond M7
 

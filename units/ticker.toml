@@ -1,0 +1,17 @@
+# Writes forever, so there is something still being shipped when oxlogd is
+# restarted underneath it.
+#
+# That is the claim worth testing: oxinit holds the read end of every pipe, so
+# a reconnecting oxlogd is handed them all again and the service writing into
+# one never notices there was a gap. Killing the shipper and watching this
+# file keep growing is what proves it.
+[unit]
+description = "Writes a line a second, forever"
+after       = ["oxlogd"]
+requires    = ["oxlogd"]
+
+[service]
+exec     = '/bin/sh -c "while /bin/true; do /bin/echo tick; /bin/sleep 1; done"'
+output   = "log"
+restart  = "no"
+stop-sec = "2s"
