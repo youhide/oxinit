@@ -1,0 +1,12 @@
+# Sends the datagram that starts `knock`.
+#
+# Ordered after the socket unit, which guarantees the address is bound — the
+# same fact `poke` relies on, and the reason binding happens before anything
+# starts.
+[unit]
+description = "Sends a datagram to the knock socket"
+after       = ["knock-socket"]
+
+[service]
+type = "oneshot"
+exec = "/bin/listen-probe --send /run/knock.sock"

@@ -14,8 +14,10 @@ use crate::error::{Error, Result};
 pub enum Source {
     /// A signal is pending on the signalfd.
     Signals,
-    /// At least one deadline has expired.
+    /// At least one monotonic deadline has expired.
     Timer,
+    /// A wall-clock deadline arrived, or the clock was set under one.
+    WallTimer,
     /// A service sent an sd_notify datagram.
     Notify,
     /// A service cgroup's `populated` key changed. Carries the id the
@@ -57,6 +59,7 @@ impl Source {
             Source::Control => (KIND_FIXED, 3),
             Source::LogSocket => (KIND_FIXED, 4),
             Source::LogShipper => (KIND_FIXED, 5),
+            Source::WallTimer => (KIND_FIXED, 6),
             Source::Cgroup(id) => (KIND_CGROUP, id),
             Source::Socket(id) => (KIND_SOCKET, id),
             Source::Client(id) => (KIND_CLIENT, id),
@@ -74,6 +77,7 @@ impl Source {
                 3 => Some(Source::Control),
                 4 => Some(Source::LogSocket),
                 5 => Some(Source::LogShipper),
+                6 => Some(Source::WallTimer),
                 _ => None,
             },
             KIND_CGROUP => Some(Source::Cgroup(id)),

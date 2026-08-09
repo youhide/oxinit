@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::process::{Child, Command};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::OFlags;
 use rustix::process::{Pid, Signal};
@@ -23,6 +23,7 @@ use crate::reap;
 use crate::shutdown::{Action, Shutdown};
 use crate::sys::raw::{setup_child, ChildSetup, Image, FIRST_LISTEN_FD};
 use crate::timer::{Alarm, Timers};
+use oxinit_timer::Next;
 
 pub struct Supervisor {
     instances: BTreeMap<String, Instance>,
@@ -47,10 +48,11 @@ pub struct Supervisor {
     /// the policy has nothing to say about it. Something else has to remember
     /// that a start was asked for, and this is it.
     pending_restart: BTreeSet<String>,
-    /// When each armed timer unit next fires. Reported by `oxctl`, and kept
-    /// here rather than asked of the deadline heap, which is a `BinaryHeap`
-    /// and answers "the soonest" rather than "this one's".
-    next_elapse: BTreeMap<String, Instant>,
+    /// When each armed timer unit next fires, on whichever clock its schedule
+    /// chose. Reported by `oxctl`, and kept here rather than asked of the
+    /// deadline heaps, which are `BinaryHeap`s and answer "the soonest" rather
+    /// than "this one's".
+    next_elapse: BTreeMap<String, Next>,
     /// Set once the machine is going down. Nothing starts after this, and
     /// every event is also a chance to notice that everything has stopped.
     shutdown: Option<Shutdown>,
@@ -522,8 +524,8 @@ impl Supervisor {
     /// `None` means there is no next one — an `on-boot` with no `interval` and
     /// no calendar is a delayed one-shot, and the unit stays `Active` with
     /// nothing pending rather than re-arming into a loop nobody asked for.
-    fn arm(&mut self, name: &str, service: &str, delay: Option<Duration>) {
-        let Some(delay) = delay else {
+    fn arm(&mut self, name: &str, service: &str, next: Option<Next>) {
+        let Some(next) = next else {
             println!("oxinit: {name} has fired; nothing further scheduled");
             self.next_elapse.remove(name);
             return;
@@ -533,11 +535,26 @@ impl Supervisor {
             unit: name.to_owned(),
         };
 
-        match self.timers.schedule(delay, alarm) {
+        // The clock is chosen by the schedule, not by this. A monotonic delay
+        // must not move when the clock is corrected; a wall-clock moment must
+        // stay the moment it is.
+        let armed = match next {
+            Next::After(delay) => self.timers.schedule(delay, alarm),
+            Next::At(at) => self.timers.schedule_at(at, alarm),
+        };
+
+        match armed {
             Ok(()) => {
-                self.next_elapse
-                    .insert(name.to_owned(), Instant::now() + delay);
-                println!("oxinit: {name} will start {service} in {delay:?}");
+                self.next_elapse.insert(name.to_owned(), next);
+                match next {
+                    Next::After(delay) => {
+                        println!("oxinit: {name} will start {service} in {delay:?}");
+                    }
+                    Next::At(at) => {
+                        let left = at.saturating_sub(unix_now());
+                        println!("oxinit: {name} will start {service} at {at} ({left}s away)");
+                    }
+                }
             }
             Err(e) => eprintln!("oxinit: {name}: {e}"),
         }
@@ -1214,12 +1231,10 @@ impl Supervisor {
             status: instance.status.clone(),
             memory: stats.memory,
             tasks: stats.tasks,
-            next_elapse: self.next_elapse.get(instance.name()).map(|at| {
-                // Rounded up. A timer that has not fired yet must never report
-                // "in 0s", which reads as broken rather than as imminent.
-                let left = at.saturating_duration_since(Instant::now());
-                left.as_secs() + u64::from(left.subsec_nanos() > 0)
-            }),
+            next_elapse: self
+                .next_elapse
+                .get(instance.name())
+                .map(|next| next.in_seconds(unix_now()).max(1)),
         }
     }
 
@@ -1275,6 +1290,23 @@ impl Supervisor {
     }
 
     /// Restart whatever the timers say is due.
+    /// The wall clock reached a calendar deadline, or was stepped.
+    pub fn on_wall_timer(&mut self) {
+        let fired = match self.timers.wall_expired(unix_now()) {
+            Ok(fired) => fired,
+            Err(e) => {
+                eprintln!("oxinit: {e}");
+                return;
+            }
+        };
+
+        for alarm in fired {
+            if let Alarm::TimerElapsed { unit } = alarm {
+                self.timer_elapsed(&unit);
+            }
+        }
+    }
+
     pub fn on_timer(&mut self) {
         let fired = match self.timers.expired() {
             Ok(fired) => fired,

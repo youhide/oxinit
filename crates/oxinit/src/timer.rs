@@ -1,9 +1,26 @@
 //! Deadlines.
 //!
-//! One timerfd and a heap, not one fd per timer. A restart storm across a
-//! hundred services would otherwise mean a hundred descriptors and an epoll
-//! registration per restart; here it means a hundred heap entries and one
-//! `timerfd_settime`.
+//! One timerfd per *clock*, and a heap each — not one fd per timer. A restart
+//! storm across a hundred services would otherwise mean a hundred descriptors
+//! and an epoll registration per restart; here it means a hundred heap entries
+//! and one `timerfd_settime`.
+//!
+//! **Two clocks, because two kinds of deadline mean different things.** A
+//! backoff, a stop timeout and a start timeout are all "this long from now",
+//! and must not move when the clock is corrected — those are `CLOCK_MONOTONIC`
+//! and relative. A calendar schedule is "at 03:30", and must stay at 03:30
+//! however the clock gets there — that is `CLOCK_REALTIME` and *absolute*.
+//!
+//! Collapsing the second into the first is what M8 shipped and M14 fixed:
+//! computing "in fourteen hours" once and arming a monotonic timer with it
+//! moves a nightly job by however much an NTP correction moves the clock. An
+//! absolute realtime timer needs no recomputation, because the kernel is
+//! comparing against the same clock that changed.
+//!
+//! `TFD_TIMER_CANCEL_ON_SET` is set as well, and is not what makes the above
+//! true — it only makes the step *visible*: the read fails with `ECANCELED`
+//! once, which is worth a line in the log and nothing else. The deadline is
+//! still correct.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -50,9 +67,30 @@ impl PartialOrd for Entry {
     }
 }
 
+/// A deadline on the wall clock, in seconds since the epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WallEntry {
+    at: u64,
+    alarm: Alarm,
+}
+
+impl Ord for WallEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.at.cmp(&other.at)
+    }
+}
+
+impl PartialOrd for WallEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub struct Timers {
     fd: OwnedFd,
     heap: BinaryHeap<Reverse<Entry>>,
+    wall: OwnedFd,
+    wall_heap: BinaryHeap<Reverse<WallEntry>>,
 }
 
 impl Timers {
@@ -63,14 +101,26 @@ impl Timers {
         )
         .map_err(Error::Timer)?;
 
+        let wall = rustix::time::timerfd_create(
+            TimerfdClockId::Realtime,
+            TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK,
+        )
+        .map_err(Error::Timer)?;
+
         Ok(Self {
             fd,
             heap: BinaryHeap::new(),
+            wall,
+            wall_heap: BinaryHeap::new(),
         })
     }
 
     pub fn as_fd(&self) -> impl AsFd + '_ {
         self.fd.as_fd()
+    }
+
+    pub fn wall_fd(&self) -> impl AsFd + '_ {
+        self.wall.as_fd()
     }
 
     /// Schedule `alarm` for `delay` from now, and rearm if it is the earliest.
@@ -80,6 +130,71 @@ impl Timers {
             alarm,
         }));
         self.arm()
+    }
+
+    /// Schedule `alarm` for a moment on the wall clock.
+    ///
+    /// Absolute, and stored absolute. A calendar schedule that was converted
+    /// to a delay here would be back to moving with the clock.
+    pub fn schedule_at(&mut self, at: u64, alarm: Alarm) -> Result<()> {
+        self.wall_heap.push(Reverse(WallEntry { at, alarm }));
+        self.arm_wall()
+    }
+
+    /// Everything on the wall clock whose moment has passed.
+    ///
+    /// A clock step makes the read fail with `ECANCELED` — once — and nothing
+    /// else needs doing: the deadlines are absolute, so they are still the
+    /// moments they were. Rearming is what clears the condition.
+    pub fn wall_expired(&mut self, now: u64) -> Result<Vec<Alarm>> {
+        let mut buf = [0u8; 8];
+        if let Err(rustix::io::Errno::CANCELED) = rustix::io::read(&self.wall, buf.as_mut_slice()) {
+            println!("oxinit: the wall clock was set; calendar deadlines are unchanged");
+            self.arm_wall()?;
+            return Ok(Vec::new());
+        }
+
+        let mut fired = Vec::new();
+        while let Some(Reverse(entry)) = self.wall_heap.peek() {
+            if entry.at > now {
+                break;
+            }
+            if let Some(Reverse(entry)) = self.wall_heap.pop() {
+                fired.push(entry.alarm);
+            }
+        }
+
+        self.arm_wall()?;
+        Ok(fired)
+    }
+
+    /// Point the realtime timerfd at the earliest wall-clock moment.
+    fn arm_wall(&self) -> Result<()> {
+        let Some(Reverse(entry)) = self.wall_heap.peek() else {
+            return disarm(&self.wall);
+        };
+
+        let spec = Itimerspec {
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: entry.at as i64,
+                tv_nsec: 0,
+            },
+        };
+
+        // ABSTIME is the point: the value is a moment, not a delay, so the
+        // kernel compares it against the clock as the clock is now rather than
+        // as it was when this was armed. CANCEL_ON_SET only asks to be told.
+        rustix::time::timerfd_settime(
+            &self.wall,
+            TimerfdTimerFlags::ABSTIME | TimerfdTimerFlags::CANCEL_ON_SET,
+            &spec,
+        )
+        .map(|_| ())
+        .map_err(Error::Timer)
     }
 
     /// Everything whose deadline has passed, and rearm for whatever is next.
@@ -139,4 +254,22 @@ impl Timers {
             .map(|_| ())
             .map_err(Error::Timer)
     }
+}
+
+/// An all-zero `itimerspec` disarms a timerfd.
+fn disarm(fd: &OwnedFd) -> Result<()> {
+    let spec = Itimerspec {
+        it_interval: Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+    };
+
+    rustix::time::timerfd_settime(fd, TimerfdTimerFlags::empty(), &spec)
+        .map(|_| ())
+        .map_err(Error::Timer)
 }

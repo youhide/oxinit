@@ -109,7 +109,9 @@ on-calendar = "03:30"
 `on-boot` and `interval` cover the monotonic cases — first firing, then every
 firing after it, measured from the previous one. The calendar vocabulary is
 deliberately closed: `hourly`, `daily`, `weekly`, `HH:MM`, `HH:MM:SS`, in UTC.
-It is not a cron expression and will not become one. A firing that arrives
+It is not a cron expression and will not become one. Calendar deadlines are
+armed absolutely on a `CLOCK_REALTIME` timerfd, so "at 03:30" survives the
+clock being corrected under it. A firing that arrives
 while the service is still running is skipped rather than queued, and a failed
 run does not stop the schedule.
 
@@ -203,7 +205,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 13 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 14 are done, and the roadmap is closed. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -222,12 +224,14 @@ container's PID 1.
 | **M11** | `after`, `requires` and `conflicts` enforced; `start-sec` bounds activation. |
 | **M12** | CI: every suite above, on every push. |
 | **M13** | Coverage for seven behaviours the milestones claimed and nothing re-ran. |
+| **M14** | Calendar schedules on the wall clock; datagram sockets; the list closed. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M13. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M14, and [ROADMAP.md](ROADMAP.md) says which two
+remaining ideas are deliberately not being taken and why. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 
