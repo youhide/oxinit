@@ -1,0 +1,18 @@
+[package]
+name = "oxctl"
+version = "0.0.0"
+description = "Command-line client for oxinit"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Not PID 1. The rules on the oxinit crate do not apply here — this process
+# may panic, may exit, and may use whatever it likes.
+#
+# No argument-parsing crate: six subcommands, each taking at most a unit name.
+# A parser generator would be more dependency than argument.
+[dependencies]
+oxinit-ipc = { path = "../oxinit-ipc" }
+rustix = { workspace = true, features = ["net"] }

@@ -14,6 +14,7 @@ publish.workspace = true
 libc.workspace = true
 oxinit-cgroup = { path = "../oxinit-cgroup" }
 oxinit-graph = { path = "../oxinit-graph" }
+oxinit-ipc = { path = "../oxinit-ipc" }
 oxinit-service = { path = "../oxinit-service" }
 oxinit-unit = { path = "../oxinit-unit" }
 oxinit-user = { path = "../oxinit-user" }

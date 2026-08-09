@@ -26,6 +26,7 @@ compile_error!(
 
 mod cgroup;
 mod console;
+mod control;
 mod error;
 mod event;
 mod listen;
@@ -139,6 +140,18 @@ fn boot() -> ! {
         }
     };
 
+    // Not fatal. A machine with no control socket still boots and still
+    // supervises; it just cannot be asked anything until the next boot, which
+    // beats not booting.
+    let mut control = match control::Control::bind() {
+        Ok(control) => Some(control),
+        Err(e) => {
+            eprintln!("oxinit: {e}");
+            eprintln!("oxinit: continuing without a control socket");
+            None
+        }
+    };
+
     // Without a cgroup hierarchy the machine still boots. It loses process
     // tracking, resource limits, `forking` readiness, and `cgroup.kill`, and
     // says so where each is asked for — which beats refusing to start.
@@ -157,6 +170,12 @@ fn boot() -> ! {
         .register(&signals, event::Source::Signals)
         .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer))
         .and_then(|()| events.register(supervisor.notify.as_fd(), event::Source::Notify));
+
+    if let Some(control) = control.as_ref() {
+        if let Err(e) = events.register(control.as_fd(), event::Source::Control) {
+            eprintln!("oxinit: {e}");
+        }
+    }
 
     if let Err(e) = registered {
         eprintln!("oxinit: {e}");
@@ -186,7 +205,13 @@ fn boot() -> ! {
     // eagerly is never activated a second time by a connection.
     supervisor.sync_sockets(&events);
 
-    run(&mut events, &signals, &mut supervisor, &mut shell)
+    run(
+        &mut events,
+        &signals,
+        &mut supervisor,
+        &mut shell,
+        &mut control,
+    )
 }
 
 /// The event loop.
@@ -195,6 +220,7 @@ fn run(
     signals: &OwnedFd,
     supervisor: &mut supervisor::Supervisor,
     shell: &mut Option<Child>,
+    control: &mut Option<control::Control>,
 ) -> ! {
     let mut sources = Vec::new();
     let mut pending = Vec::new();
@@ -218,6 +244,8 @@ fn run(
                 event::Source::Notify => supervisor.on_notify(),
                 event::Source::Cgroup(id) => supervisor.on_cgroup(*id),
                 event::Source::Socket(id) => supervisor.on_socket(*id),
+                event::Source::Control => on_connect(control, events),
+                event::Source::Client(id) => on_request(control, events, supervisor, *id),
             }));
 
             if result.is_err() {
@@ -294,6 +322,61 @@ fn on_signals(
             _ => {}
         }
     }
+}
+
+/// Someone connected to the control socket.
+///
+/// The connection is registered with epoll rather than read here, because a
+/// client that connects and then says nothing must cost PID 1 no time at all.
+fn on_connect(control: &mut Option<control::Control>, events: &event::EventLoop) {
+    let Some(control) = control.as_mut() else {
+        return;
+    };
+    let Some(id) = control.accept() else {
+        return;
+    };
+
+    let registered = control
+        .fd(id)
+        .map(|fd| events.register(fd, event::Source::Client(id)));
+
+    if !matches!(registered, Some(Ok(()))) {
+        control.close(id);
+    }
+}
+
+/// A control client sent a request, or hung up.
+///
+/// One request per connection. The reply goes back and the connection closes,
+/// which is why nothing here has to remember anything between messages.
+fn on_request(
+    control: &mut Option<control::Control>,
+    events: &event::EventLoop,
+    supervisor: &mut supervisor::Supervisor,
+    id: u32,
+) {
+    let Some(control) = control.as_mut() else {
+        return;
+    };
+
+    if let Some(message) = control.recv(id) {
+        let response = match oxinit_ipc::decode::<oxinit_ipc::Request>(&message) {
+            Ok(request) => supervisor.handle(request),
+            Err(e) => oxinit_ipc::Response::Error {
+                message: e.to_string(),
+            },
+        };
+
+        match oxinit_ipc::encode(&response) {
+            Ok(bytes) => control.reply(id, &bytes),
+            Err(e) => eprintln!("oxinit: control: {e}"),
+        }
+    }
+
+    // Deregistered before the descriptor closes, or epoll is left holding one
+    // that no longer exists.
+    let _ = control.fd(id).map(|fd| events.deregister(fd));
+    control.close(id);
 }
 
 /// Block every signal, then open the signalfd that replaces them.

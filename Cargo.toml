@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/listen-probe",
     "crates/notify-probe",
+    "crates/oxctl",
     "crates/oxinit",
     "crates/oxinit-cgroup",
     "crates/oxinit-graph",
+    "crates/oxinit-ipc",
     "crates/oxinit-service",
     "crates/oxinit-unit",
     "crates/oxinit-user",
@@ -28,6 +30,10 @@ basic-toml = "0.1"
 libc = "0.2"
 rustix = "1.1"
 serde = "1"
+# JSON on the control socket. ARCHITECTURE argues the choice: inspectable with
+# socat while the message set is still changing matters more than bytes on the
+# wire for a socket carrying a few messages a minute.
+serde_json = "1"
 thiserror = "2"
 
 [profile.release]

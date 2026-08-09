@@ -8,6 +8,7 @@ use std::time::Duration;
 use rustix::process::{Pid, Signal};
 
 use oxinit_cgroup::Cgroup;
+use oxinit_ipc::{Request, Response, UnitStatus};
 use oxinit_service::{Exit, Instance, State, StopCause};
 use oxinit_unit::{Kind, Resources, ServiceType, Unit};
 
@@ -22,6 +23,9 @@ use crate::timer::{Alarm, Timers};
 
 pub struct Supervisor {
     instances: BTreeMap<String, Instance>,
+    /// Kept for `reload`, which has to expand `%H` the same way the first
+    /// load did or the same file would parse into a different unit.
+    hostname: String,
     /// Resolved start order. Also the order things are reported in.
     order: Vec<String>,
     pub timers: Timers,
@@ -55,6 +59,7 @@ impl Supervisor {
                 cgroups,
                 sockets: Sockets::new(),
                 shutdown: None,
+                hostname: hostname.to_owned(),
             };
         }
 
@@ -81,6 +86,7 @@ impl Supervisor {
             cgroups,
             sockets: Sockets::new(),
             shutdown: None,
+            hostname: hostname.to_owned(),
         };
 
         // An instance for every unit that loaded, not just the ones in the
@@ -671,6 +677,182 @@ impl Supervisor {
         }
     }
 
+    /// Answer one control request.
+    ///
+    /// Every answer is immediate. A stop is not over when this returns — it
+    /// ends when the unit's cgroup empties — and oxinit does not hold a client
+    /// connection open waiting for that. `Accepted` says what was asked for,
+    /// not what has finished.
+    pub fn handle(&mut self, request: Request) -> Response {
+        match request {
+            Request::List => Response::Units(
+                self.instances
+                    .values()
+                    .map(|instance| self.describe(instance))
+                    .collect(),
+            ),
+
+            Request::Status { unit } => match self.instances.get(&unit) {
+                Some(instance) => Response::Units(vec![self.describe(instance)]),
+                None => unknown(&unit),
+            },
+
+            Request::Start { unit } => {
+                if !self.instances.contains_key(&unit) {
+                    return unknown(&unit);
+                }
+                if self.shutting_down() {
+                    return refused("the machine is shutting down");
+                }
+                self.start(&unit);
+                accepted(format!("started {unit}"))
+            }
+
+            Request::Stop { unit } => {
+                if !self.instances.contains_key(&unit) {
+                    return unknown(&unit);
+                }
+                self.stop(&unit, StopCause::Requested);
+                accepted(format!("stopping {unit}"))
+            }
+
+            Request::Restart { unit } => {
+                if !self.instances.contains_key(&unit) {
+                    return unknown(&unit);
+                }
+                if self.shutting_down() {
+                    return refused("the machine is shutting down");
+                }
+
+                // Stop, then start once it is actually down. A restart that
+                // started the new process before the old one released its
+                // cgroup would be two processes, not one.
+                self.stop(&unit, StopCause::Requested);
+                self.restart_when_stopped(&unit);
+                accepted(format!("restarting {unit}"))
+            }
+
+            Request::Reload => self.reload(),
+        }
+    }
+
+    /// Re-read the unit directories.
+    ///
+    /// Applies to units that are not running. A unit that is up keeps the
+    /// definition it was started with until it stops — rewriting it underneath
+    /// a running process would describe something that is not what is running.
+    ///
+    /// A new unit becomes known and gets a cgroup. A socket unit is *not*
+    /// re-bound: its descriptors were bound and registered with epoll once, at
+    /// boot, and changing that safely is not something a reload can do.
+    fn reload(&mut self) -> Response {
+        let loaded = oxinit_unit::load_default(&self.hostname);
+
+        if !loaded.errors.is_empty() {
+            let problems: Vec<String> = loaded.errors.iter().map(ToString::to_string).collect();
+            return Response::Error {
+                message: problems.join("; "),
+            };
+        }
+
+        let mut changed = Vec::new();
+        let mut skipped = Vec::new();
+
+        for (name, unit) in &loaded.units {
+            match self.instances.get(name) {
+                Some(existing) if existing.unit == *unit => {}
+                Some(existing) if !is_idle(existing.state) => skipped.push(name.clone()),
+                Some(_) | None => {
+                    if matches!(unit.kind, Kind::Service(_)) {
+                        if let Err(e) = self.cgroups.add(name, &unit.full_name()) {
+                            eprintln!("oxinit: {name}: {e}");
+                        }
+                    }
+                    self.instances
+                        .insert(name.clone(), Instance::new(unit.clone()));
+                    changed.push(name.clone());
+                }
+            }
+        }
+
+        // A unit whose file is gone, and which is not running, stops being
+        // known. One that is still running is left alone; it will go when it
+        // stops and a later reload notices.
+        self.instances.retain(|name, instance| {
+            let gone = !loaded.units.contains_key(name);
+            if gone && !is_idle(instance.state) {
+                skipped.push(name.clone());
+                return true;
+            }
+            !gone
+        });
+
+        let mut message = format!("{} unit(s) reloaded", changed.len());
+        if !skipped.is_empty() {
+            message.push_str(&format!(
+                "; {} left alone because they are running: {}",
+                skipped.len(),
+                skipped.join(", ")
+            ));
+        }
+        accepted(message)
+    }
+
+    /// Start a unit again once it has finished stopping.
+    fn restart_when_stopped(&mut self, name: &str) {
+        let Some(instance) = self.instances.get(name) else {
+            return;
+        };
+
+        // Already down: nothing to wait for.
+        if is_idle(instance.state) {
+            self.start(name);
+            return;
+        }
+
+        let stop_sec = instance
+            .unit
+            .service()
+            .map_or(Duration::from_secs(30), |service| service.stop_sec);
+
+        // Checked again when it fires, so a unit that stopped sooner is
+        // started sooner by the settle path rather than waited on here.
+        let alarm = Alarm::Restart {
+            unit: name.to_owned(),
+        };
+        if let Err(e) = self
+            .timers
+            .schedule(stop_sec + Duration::from_millis(50), alarm)
+        {
+            eprintln!("oxinit: {e}");
+        }
+    }
+
+    fn describe(&self, instance: &Instance) -> UnitStatus {
+        let stats = self
+            .cgroups
+            .get(instance.name())
+            .map(|cgroup| cgroup.stats())
+            .unwrap_or_default();
+
+        UnitStatus {
+            name: instance.name().to_owned(),
+            kind: match instance.unit.kind {
+                Kind::Service(_) => "service",
+                Kind::Target => "target",
+                Kind::Socket(_) => "socket",
+            }
+            .to_owned(),
+            description: instance.unit.description.clone(),
+            state: instance.state.to_string(),
+            pid: instance.pid(),
+            restarts: instance.restarts,
+            status: instance.status.clone(),
+            memory: stats.memory,
+            tasks: stats.tasks,
+        }
+    }
+
     /// Print what every unit is doing.
     ///
     /// The whole state of the machine on the console, which until the control
@@ -819,6 +1001,22 @@ fn terminate(pid: u32) -> bool {
         .ok()
         .and_then(Pid::from_raw)
         .is_some_and(|pid| rustix::process::kill_process(pid, Signal::TERM).is_ok())
+}
+
+fn accepted(message: String) -> Response {
+    Response::Accepted { message }
+}
+
+fn unknown(unit: &str) -> Response {
+    Response::Error {
+        message: format!("no unit named `{unit}`"),
+    }
+}
+
+fn refused(why: &str) -> Response {
+    Response::Error {
+        message: why.to_owned(),
+    }
 }
 
 /// A unit that is not running, so a connection on its socket should start it.

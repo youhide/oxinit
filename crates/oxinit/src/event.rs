@@ -25,6 +25,10 @@ pub enum Source {
     /// A connection arrived on a socket unit's descriptor. Carries the id of
     /// that descriptor.
     Socket(u32),
+    /// Someone connected to the control socket.
+    Control,
+    /// A connected control client sent something, or hung up.
+    Client(u32),
 }
 
 /// epoll carries one `u64` per registration and hands it back unchanged, so
@@ -37,6 +41,7 @@ const KIND_SHIFT: u32 = 32;
 const KIND_FIXED: u64 = 0;
 const KIND_CGROUP: u64 = 1;
 const KIND_SOCKET: u64 = 2;
+const KIND_CLIENT: u64 = 3;
 
 impl Source {
     const fn token(self) -> u64 {
@@ -44,8 +49,10 @@ impl Source {
             Source::Signals => (KIND_FIXED, 0),
             Source::Timer => (KIND_FIXED, 1),
             Source::Notify => (KIND_FIXED, 2),
+            Source::Control => (KIND_FIXED, 3),
             Source::Cgroup(id) => (KIND_CGROUP, id),
             Source::Socket(id) => (KIND_SOCKET, id),
+            Source::Client(id) => (KIND_CLIENT, id),
         };
         (kind << KIND_SHIFT) | id as u64
     }
@@ -57,10 +64,12 @@ impl Source {
                 0 => Some(Source::Signals),
                 1 => Some(Source::Timer),
                 2 => Some(Source::Notify),
+                3 => Some(Source::Control),
                 _ => None,
             },
             KIND_CGROUP => Some(Source::Cgroup(id)),
             KIND_SOCKET => Some(Source::Socket(id)),
+            KIND_CLIENT => Some(Source::Client(id)),
             _ => None,
         }
     }
