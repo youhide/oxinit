@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/notify-probe",
     "crates/oxinit",
+    "crates/oxinit-cgroup",
     "crates/oxinit-graph",
     "crates/oxinit-service",
     "crates/oxinit-unit",
+    "crates/oxinit-user",
     "crates/xtask",
 ]
 
