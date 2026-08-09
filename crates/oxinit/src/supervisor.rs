@@ -36,6 +36,10 @@ pub struct Supervisor {
     pub cgroups: Cgroups,
     pub sockets: Sockets,
     pub logs: Logs,
+    /// Queued to start, in resolved order, and not started yet.
+    ///
+    /// What makes `after` mean "wait for it" rather than "issue it first".
+    pending: Vec<String>,
     /// Units an `oxctl restart` is waiting to start again.
     ///
     /// Separate from the restart policy, and deliberately: a requested stop
@@ -80,6 +84,7 @@ impl Supervisor {
                 cgroups,
                 logs,
                 sockets: Sockets::new(),
+                pending: Vec::new(),
                 pending_restart: BTreeSet::new(),
                 next_elapse: BTreeMap::new(),
                 shutdown: None,
@@ -110,6 +115,7 @@ impl Supervisor {
             cgroups,
             logs,
             sockets: Sockets::new(),
+            pending: Vec::new(),
             pending_restart: BTreeSet::new(),
             next_elapse: BTreeMap::new(),
             shutdown: None,
@@ -156,11 +162,122 @@ impl Supervisor {
         self.order.is_empty()
     }
 
-    /// Start everything, in resolved order.
+    /// Queue every unit in the resolved order, then start whatever is ready.
+    ///
+    /// Not a loop over `order` calling `start`. `start` returns as soon as the
+    /// child is forked, and a `notify` service is `Activating` until `READY=1`
+    /// arrives — which is an event, so a loop would have started everything
+    /// else by then. `after` would mean "issued in this order", where the unit
+    /// format says "not started until every named unit has finished
+    /// activating".
+    ///
+    /// So boot is a queue drained by the same event loop as everything else,
+    /// which is the shape shutdown already has and for the same reason: what
+    /// it is waiting for arrives as events, and re-implementing the reaper and
+    /// the timers to wait on them synchronously is how you strand a machine.
     pub fn start_all(&mut self) {
-        for name in self.order.clone() {
+        self.pending = self.order.clone();
+        self.pump();
+    }
+
+    /// Start every queued unit whose ordering is satisfied, until none is.
+    ///
+    /// Called after every event, like socket reconciliation, rather than from
+    /// each of the dozen places a unit can finish activating. Idempotent, and
+    /// it cannot be forgotten by a path added later.
+    pub fn pump(&mut self) {
+        // Nothing starts once the machine is going down, including a unit
+        // whose turn arrives mid-shutdown.
+        if self.shutting_down() {
+            self.pending.clear();
+            return;
+        }
+
+        while let Some(name) = self.next_startable() {
+            self.pending.retain(|queued| *queued != name);
+
+            // Checked here rather than at load: `requires` implies no
+            // ordering, so at this moment the requirement may not have run
+            // yet. Having already failed is the only thing that can be known,
+            // and it is the thing the unit format promises to act on.
+            if let Some(failed) = self.failed_requirement(&name) {
+                eprintln!("oxinit: {name}: requires `{failed}`, which failed; not starting");
+                if let Some(instance) = self.instances.get_mut(&name) {
+                    instance.failed_to_start();
+                }
+                continue;
+            }
+
             self.start(&name);
         }
+    }
+
+    /// The first queued unit with nothing left to wait for.
+    fn next_startable(&self) -> Option<String> {
+        self.pending
+            .iter()
+            .find(|name| self.ordering_satisfied(name))
+            .cloned()
+    }
+
+    /// Whether every unit this one is `after` has finished activating.
+    fn ordering_satisfied(&self, name: &str) -> bool {
+        let Some(instance) = self.instances.get(name) else {
+            return false;
+        };
+
+        instance.unit.deps.after.iter().all(|dep| {
+            // Still queued: it is going to start, so wait for it.
+            if self.pending.iter().any(|queued| queued == dep) {
+                return false;
+            }
+
+            match self.instances.get(dep) {
+                // `after` on a unit that is not being started at all imposes
+                // no delay. It orders units that are already going to start;
+                // it does not cause them to start.
+                None => true,
+                Some(dep) => dep.state != State::Activating,
+            }
+        })
+    }
+
+    /// A requirement that has already failed, if there is one.
+    fn failed_requirement(&self, name: &str) -> Option<String> {
+        let instance = self.instances.get(name)?;
+
+        instance
+            .unit
+            .deps
+            .requires
+            .iter()
+            .find(|dep| {
+                self.instances
+                    .get(*dep)
+                    .is_some_and(|dep| dep.state == State::Failed)
+            })
+            .cloned()
+    }
+
+    /// Units that cannot run at the same time as this one.
+    ///
+    /// Symmetric even when only one side declares it, which is what the unit
+    /// format says: a unit should not have to be edited to be excluded by
+    /// something it has never heard of.
+    fn conflicting_with(&self, name: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .instances
+            .get(name)
+            .map(|instance| instance.unit.deps.conflicts.clone())
+            .unwrap_or_default();
+
+        for (other, instance) in &self.instances {
+            if instance.unit.deps.conflicts.iter().any(|c| c == name) && !names.contains(other) {
+                names.push(other.clone());
+            }
+        }
+
+        names
     }
 
     /// Begin an ordered shutdown.
@@ -178,9 +295,34 @@ impl Supervisor {
         println!("oxinit: shutting down to {action}");
         self.shutdown = Some(Shutdown::new(action));
 
-        for name in self.order.clone().into_iter().rev() {
+        for name in self.stop_order() {
             self.stop(&name, StopCause::Requested);
         }
+    }
+
+    /// Every unit, in the reverse of the order they started.
+    ///
+    /// The resolved order first, reversed, so a service goes down before
+    /// whatever it was ordered after. Then everything else — a unit that is
+    /// running but is not in that order, because nothing reachable from
+    /// `default` wanted it and it was started by a connection or by `oxctl`.
+    ///
+    /// Iterating the resolved order alone left those running, and `settled`
+    /// waits for every unit rather than for the ordered ones, so the machine
+    /// would sit there until the whole-shutdown deadline expired and then go
+    /// down anyway with a service still holding whatever it held. Nothing had
+    /// caught it: the only such unit was socket-activated and exited on its
+    /// own before anyone asked.
+    fn stop_order(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.order.iter().rev().cloned().collect();
+
+        for name in self.instances.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+
+        names
     }
 
     pub fn shutting_down(&self) -> bool {
@@ -219,6 +361,20 @@ impl Supervisor {
         // whose restart timer happens to come due mid-shutdown.
         if self.shutting_down() {
             return;
+        }
+
+        // Before anything else, and before the unit's own state changes: what
+        // this unit excludes has to be on its way down before it is up, or
+        // both are running at once for as long as the stop takes.
+        for other in self.conflicting_with(name) {
+            if self
+                .instances
+                .get(&other)
+                .is_some_and(|instance| !is_idle(instance.state))
+            {
+                println!("oxinit: {name} conflicts with {other}; stopping it");
+                self.stop(&other, StopCause::Requested);
+            }
         }
 
         let Some(instance) = self.instances.get_mut(name) else {
@@ -332,6 +488,24 @@ impl Supervisor {
 
                 let ready = instance.state == State::Active;
                 println!("oxinit: started {name} as pid {pid}");
+
+                // Only for a unit that is actually waiting on something. A
+                // `simple` service is Active by the line above, and arming a
+                // deadline for a state it has already left is an alarm that
+                // can only ever be a false one.
+                if !ready {
+                    let start_sec = instance
+                        .unit
+                        .service()
+                        .map_or(Duration::from_secs(90), |service| service.start_sec);
+                    let alarm = Alarm::StartTimeout {
+                        unit: name.to_owned(),
+                    };
+                    if let Err(e) = self.timers.schedule(start_sec, alarm) {
+                        eprintln!("oxinit: {e}");
+                    }
+                }
+
                 if ready {
                     self.report_usage(name);
                 }
@@ -651,6 +825,11 @@ impl Supervisor {
     /// oxinit forked. A `forking` service has no process oxinit forked left
     /// to signal, and a service that spawned workers has more than one.
     fn stop(&mut self, name: &str, cause: StopCause) {
+        // Queued but never started. Dropping it from the queue is the whole of
+        // stopping it, and leaving it there would have a stop be followed by a
+        // start as soon as its ordering came good.
+        self.pending.retain(|queued| queued != name);
+
         let Some(instance) = self.instances.get_mut(name) else {
             return;
         };
@@ -705,6 +884,28 @@ impl Supervisor {
         if let Err(e) = self.timers.schedule(stop_sec, alarm) {
             eprintln!("oxinit: {e}");
         }
+    }
+
+    /// `start-sec` elapsed and the unit is still `Activating`.
+    ///
+    /// Not cancelled when the unit becomes ready — the deadline is left in the
+    /// heap and this checks the state when it fires. Removing an entry from a
+    /// `BinaryHeap` costs a rebuild, and a stale alarm that finds nothing to
+    /// do is cheaper than keeping the heap exact.
+    ///
+    /// The unit goes through the ordinary stop path rather than being
+    /// abandoned: it has a process, and a service that never signalled
+    /// readiness is still running.
+    fn start_timed_out(&mut self, name: &str) {
+        let Some(instance) = self.instances.get(name) else {
+            return;
+        };
+        if instance.state != State::Activating {
+            return;
+        }
+
+        eprintln!("oxinit: {name} did not start in time; stopping it");
+        self.stop(name, StopCause::Watchdog);
     }
 
     /// `stop-sec` elapsed and the unit is still there.
@@ -1097,6 +1298,7 @@ impl Supervisor {
                 Alarm::WatchdogCheck { unit } => self.check_watchdog(&unit),
                 Alarm::StopTimeout { unit } => self.stop_timed_out(&unit),
                 Alarm::TimerElapsed { unit } => self.timer_elapsed(&unit),
+                Alarm::StartTimeout { unit } => self.start_timed_out(&unit),
             }
         }
     }

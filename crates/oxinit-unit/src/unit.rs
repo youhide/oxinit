@@ -13,6 +13,13 @@ use crate::value::{DurationValue, SizeValue};
 /// Default delay before a restart, before backoff scales it.
 const DEFAULT_RESTART_SEC: Duration = Duration::from_millis(100);
 
+/// Default bound on `Activating`.
+///
+/// Generous, because it is a backstop rather than a schedule: a service that
+/// legitimately takes a minute to come up must not be killed for it, and one
+/// that is never coming up must not hold the boot open forever.
+const DEFAULT_START_SEC: Duration = Duration::from_secs(90);
+
 /// Default grace period between `SIGTERM` and `cgroup.kill`.
 const DEFAULT_STOP_SEC: Duration = Duration::from_secs(30);
 
@@ -102,6 +109,12 @@ pub struct Service {
     pub exec: Vec<String>,
     pub restart: Restart,
     pub restart_sec: Duration,
+    /// How long the service may stay `Activating` before it has failed.
+    ///
+    /// Unbounded activation is what makes one service that never signals
+    /// readiness stall every unit ordered after it, with nothing to break the
+    /// deadlock.
+    pub start_sec: Duration,
     /// How long the service has between `SIGTERM` and `cgroup.kill`.
     pub stop_sec: Duration,
     /// How long the service may go without a `WATCHDOG=1` ping. `None`
@@ -244,6 +257,7 @@ struct RawService {
     exec: String,
     restart: Option<Restart>,
     restart_sec: Option<DurationValue>,
+    start_sec: Option<DurationValue>,
     stop_sec: Option<DurationValue>,
     watchdog_sec: Option<DurationValue>,
     user: Option<String>,
@@ -368,6 +382,7 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
                 restart_sec: service
                     .restart_sec
                     .map_or(DEFAULT_RESTART_SEC, |value| value.0),
+                start_sec: service.start_sec.map_or(DEFAULT_START_SEC, |value| value.0),
                 stop_sec: service.stop_sec.map_or(DEFAULT_STOP_SEC, |value| value.0),
                 watchdog_sec,
                 user,
@@ -648,6 +663,7 @@ tasks-max  = 512
         assert_eq!(service.ty, ServiceType::Simple);
         assert_eq!(service.restart, Restart::No);
         assert_eq!(service.restart_sec, DEFAULT_RESTART_SEC);
+        assert_eq!(service.start_sec, DEFAULT_START_SEC);
         assert_eq!(service.stop_sec, DEFAULT_STOP_SEC);
         assert_eq!(service.watchdog_sec, None, "watchdog is off by default");
         assert_eq!(service.user, "root");

@@ -26,6 +26,8 @@ pub enum Alarm {
     StopTimeout { unit: String },
     /// A timer unit elapsed. Start what it names, then arm it again.
     TimerElapsed { unit: String },
+    /// A unit's `start-sec` has elapsed and it is still `Activating`.
+    StartTimeout { unit: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

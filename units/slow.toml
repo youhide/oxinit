@@ -1,0 +1,12 @@
+# Never signals readiness. `start-sec` is the only thing that can end its
+# activation, and until it does, everything ordered after it waits — which is
+# exactly the deadlock the bound exists to break.
+[unit]
+description = "Never becomes ready"
+
+[service]
+type      = "notify"
+exec      = "/bin/notify-probe --never-ready"
+start-sec = "2s"
+stop-sec  = "1s"
+restart   = "no"

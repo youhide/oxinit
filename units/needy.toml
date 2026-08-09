@@ -1,0 +1,13 @@
+# `requires` a unit that fails. It must not start, and must say why.
+#
+# `after` as well as `requires`, and the two are not the same statement:
+# without the ordering there is no guarantee `broken` has run yet, and a
+# requirement that has not failed *yet* is not a requirement that failed.
+[unit]
+description = "Requires something that fails"
+requires    = ["broken"]
+after       = ["broken"]
+
+[service]
+type = "oneshot"
+exec = "/bin/echo oxinit-m11: needy should never print this"

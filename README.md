@@ -67,6 +67,10 @@ tasks-max  = 512
 needs B running" and "A must start after B" are different statements, and
 conflating them makes both impossible to express precisely.
 
+`after` means the unit is not started until every unit it names has finished
+activating — for a `notify` service, until `READY=1` actually arrives. Boot is
+a queue drained by the event loop, not a loop that issues starts in order.
+
 Every key is specified in [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md). That
 document is the specification, not a description of the parser.
 
@@ -198,7 +202,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 10 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 11 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -214,12 +218,13 @@ container's PID 1.
 | **M8** | Timer units: `on-boot`, `interval`, and a closed calendar vocabulary. |
 | **M9** | aarch64 as a tested target, not an assumed one. Both boot the same suite. |
 | **M10** | A real distribution userspace, with dynamically linked services. |
+| **M11** | `after`, `requires` and `conflicts` enforced; `start-sec` bounds activation. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M10. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M11. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 

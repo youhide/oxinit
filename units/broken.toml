@@ -1,0 +1,9 @@
+# Fails once and stays failed, so that `needy` has a failed requirement to
+# refuse to start against.
+[unit]
+description = "Fails immediately"
+
+[service]
+type    = "oneshot"
+exec    = "/bin/false"
+restart = "no"

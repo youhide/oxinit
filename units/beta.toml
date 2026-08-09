@@ -1,0 +1,15 @@
+# Declares the exclusion, and is not reachable from `default` — the graph
+# refuses a unit set where two conflicting units are both wanted, so the only
+# way in is an explicit start.
+#
+# `alpha` says nothing about `beta`. The relationship is symmetric anyway,
+# which is the point: a unit should not have to be edited to be excluded by
+# something it has never heard of.
+[unit]
+description = "Excludes alpha"
+conflicts   = ["alpha"]
+
+[service]
+exec     = "/bin/sleep 600"
+restart  = "no"
+stop-sec = "1s"

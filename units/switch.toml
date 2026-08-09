@@ -1,0 +1,8 @@
+# Starts `beta`, which must stop `alpha` on the way up.
+[unit]
+description = "Starts beta over alpha"
+after       = ["alpha"]
+
+[service]
+type = "oneshot"
+exec = "/bin/oxctl start beta"

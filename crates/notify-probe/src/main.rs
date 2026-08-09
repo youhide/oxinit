@@ -40,6 +40,16 @@ fn main() -> io::Result<()> {
         println!("notify-probe: ignoring SIGTERM");
     }
 
+    // For the start timeout: a service that never signals readiness, which is
+    // what leaves a unit Activating forever and everything ordered after it
+    // waiting on a state it will never leave.
+    if std::env::args().any(|arg| arg == "--never-ready") {
+        println!("notify-probe: never going ready");
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
+
     send("READY=1\nSTATUS=probe up\n")?;
     println!("notify-probe: sent READY=1");
 

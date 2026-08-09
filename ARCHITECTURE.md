@@ -471,6 +471,39 @@ after    = ["network-online"]
 is a legitimate configuration, and it is what you get if you only write
 `requires`. The parser does not add ordering implicitly.
 
+### From an order to a queue
+
+Kahn's algorithm produces a topological order. What consumes it is not a loop.
+
+`start` returns as soon as the child is forked, and a `notify` service is
+`Activating` until `READY=1` arrives — which is an event. A loop calling
+`start` down the resolved order would therefore have issued every start before
+the first one finished activating, and `after` would mean "issued in this
+order" rather than "not started until every named unit has finished
+activating", which is what the unit format says.
+
+So the resolved order is a **queue**. Every unit is enqueued, and a
+reconciliation pass runs after every event: it starts each queued unit whose
+`after` dependencies have all left `Activating`, and stops when none is
+eligible. That is the shape shutdown already has, for the same reason — what
+it is waiting for arrives as events, and re-implementing the reaper and the
+timers to wait on them synchronously is how a machine gets stranded.
+
+Three consequences worth stating:
+
+- **`requires` is evaluated when the unit starts, not at load.** `requires`
+  implies no ordering, so at that moment the requirement may not have run yet.
+  Whether it has *already failed* is the only thing that can be known, and it
+  is the thing the format promises to act on.
+- **`conflicts` is enforced on start, and is symmetric.** Starting a unit stops
+  what it excludes before it comes up, whichever side declared the exclusion —
+  a unit should not have to be edited to be excluded by something it has never
+  heard of. The graph separately refuses a unit set in which two conflicting
+  units are both reachable, which is a load-time question and a different one.
+- **Activation has to be bounded, or the queue deadlocks.** `start-sec` is in
+  the same milestone as the gating for that reason: gating on a state with no
+  exit is a boot that never finishes.
+
 ### Graph
 
 Ordering edges form a DAG. Resolution is Kahn's algorithm:
