@@ -218,7 +218,7 @@ Nothing needs it yet.
 
 ## M5 — Shutdown and the client
 
-**Next.**
+**Done.**
 
 - [x] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
       `cgroup.kill`.
@@ -230,7 +230,7 @@ Nothing needs it yet.
       `0600`.
 - [x] `oxinit-ipc` request and response types, JSON on the wire.
 - [x] `oxctl`: `start`, `stop`, `restart`, `status`, `list`, `reload`.
-- [ ] `cargo xtask test-boot` — boot with a timeout, assert on serial output.
+- [x] `cargo xtask test-boot` — boot with a timeout, assert on serial output.
 - [x] `init.scope`: move PID 1 into a leaf cgroup before delegating
       controllers.
 - [x] Read the hostname back when `sethostname` is refused, rather than
@@ -245,9 +245,59 @@ and PID 1 lives there. Moving PID 1 into a leaf first removes that dependency,
 stops accounting PID 1's own memory at the root, and is what makes the cgroup
 path work anywhere the root is not really the root.
 
+`oxinit-ipc` holds the request and response types, shared by both sides, so the
+wire format is a type rather than a convention written down twice. One of its
+tests pins the JSON encoding rather than letting derive decide it — being
+readable with `socat` is the reason it is JSON at all. `serde_json` is the one
+new dependency.
+
+Nothing on the control socket blocks. A client connection is registered with
+epoll like every other descriptor, and every answer is immediate: `Accepted`
+says what was asked for, not what has finished, because a stop ends when the
+unit's cgroup empties and the one socket that has to stay responsive must not
+wait on the slowest thing on the machine.
+
+`cargo xtask test-boot` asserts eighteen lines on the serial log, one per thing
+this roadmap claims works, and fails if the machine does not power itself off
+within ninety seconds. It was checked against a deliberately broken image:
+removing `units/dropped.toml` fails exactly the two privilege-drop checks and
+nothing else.
+
+A bug found by running it: rustix's `recv` returns the *message* length
+alongside the number of bytes that landed in the buffer, not the number
+discarded. Read as "dropped", it rejected every well-formed request.
+
+Verified under QEMU:
+
+- `SIGUSR2` prints every unit's state, pid, restart count and last `STATUS=`.
+- `SIGTERM` stops units in reverse start order — targets and sockets at once,
+  services as their cgroups empty — then syncs and powers off. QEMU exits on
+  its own. `SIGINT` reboots instead, and `Run /init as init process` appears
+  twice in one log.
+- `/proc/1/cgroup` is `0::/init.scope`, and the root's `cgroup.subtree_control`
+  still reads `memory pids`.
+- `oxctl list` prints all units; `oxctl status probe` prints its pid, `STATUS=`,
+  `memory.current` and `pids.current`; `oxctl stop limited` is followed by
+  oxinit reporting it inactive; `oxctl status nosuch` fails with a message and
+  a non-zero exit.
+
+Verified in a container: with a writable cgroupfs, `cgroup.subtree_control`
+reads `memory pids` instead of failing with `EBUSY`, `oxinit.slice` and its
+per-service cgroups exist, and `[resources]` limits land. `--hostname demo-box`
+makes `%H` expand to `demo-box`.
+
+115 host tests across seven library crates.
+
+Deferred out of M5: the controlling terminal. M0 noted that the console shell
+reports "can't access tty; job control turned off" and that `setsid` plus
+`TIOCSCTTY` belonged with the signal work here. It belongs with the console
+work in M6 instead — deciding whether to take over `/dev/console` at all comes
+first, and doing terminal setup for a console oxinit should not have claimed
+would be the wrong order.
+
 ## M6 — Containers
 
-**Not started.**
+**Next.**
 
 oxinit is a plausible PID 1 for a container — the job there is reaping
 orphans, forwarding signals, and supervising more than one process, which is
@@ -266,6 +316,8 @@ booted a machine.
 - [ ] README and docs: running oxinit as PID 1 under Docker and Kubernetes,
       including what `[resources]` means when the runtime already caps the
       container.
+- [ ] Give the console shell a controlling terminal — `setsid` plus
+      `TIOCSCTTY` — once it is settled which console it should own.
 
 Measured in a container before any of this was written, against Docker with
 cgroup v2. What already worked: unit loading and resolution, `sd_notify` and

@@ -38,9 +38,18 @@ pub struct Cgroups {
 impl Cgroups {
     pub fn open(root: &str) -> std::result::Result<Self, CgroupError> {
         let init = rustix::process::getpid().as_raw_nonzero().get() as u32;
+        let hierarchy = Hierarchy::new(root, init)?;
+
+        // Where PID 1 actually ended up, read back rather than assumed. The
+        // move into `init.scope` is best-effort, and whether it worked is what
+        // decides if delegation could work at all — so it is worth one line at
+        // boot, from the kernel's answer rather than oxinit's intention.
+        if let Ok(placement) = std::fs::read_to_string("/proc/self/cgroup") {
+            println!("oxinit: pid 1 is in {}", placement.trim());
+        }
 
         Ok(Self {
-            hierarchy: Some(Hierarchy::new(root, init)?),
+            hierarchy: Some(hierarchy),
             handles: Vec::new(),
         })
     }
