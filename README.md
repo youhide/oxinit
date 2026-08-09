@@ -198,7 +198,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 8 are done. oxinit boots under QEMU and runs as a
+Milestones 0 through 9 are done. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -212,12 +212,13 @@ container's PID 1.
 | **M6** | Containers, and a console with a controlling terminal. |
 | **M7** | Logs: a pipe per service, `oxlogd`, rotation, `oxctl logs`. |
 | **M8** | Timer units: `on-boot`, `interval`, and a closed calendar vocabulary. |
+| **M9** | aarch64 as a tested target, not an assumed one. Both boot the same suite. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M8. [ROADMAP.md](ROADMAP.md) has the breakdown,
+Nothing is scheduled after M9. [ROADMAP.md](ROADMAP.md) has the breakdown,
 including what each milestone was verified against and what was deferred out
 of it.
 
@@ -243,8 +244,8 @@ Edit to boot takes a few seconds. `Ctrl-A X` exits QEMU. Setup details are in
 Two suites assert on that boot rather than asking you to watch it:
 
 ```bash
-cargo xtask test-boot    # boots QEMU with a timeout, matches the serial log
-cargo xtask container    # runs it in Docker, checks the log and the exit code
+cargo xtask test-boot --arch all   # boots x86_64 and aarch64, matches the log
+cargo xtask container              # runs it in Docker, checks the exit code
 ```
 
 The library crates test on any host, with no VM and no kernel:
@@ -354,7 +355,11 @@ layer is Linux-bound.
 
 None of that is planned. Getting one platform right comes first.
 
-Architecture support is a separate axis: x86_64 and aarch64, both musl.
+Architecture support is a separate axis: x86_64 and aarch64, both musl, and
+both actually booted — `cargo xtask test-boot --arch all` runs the same
+twenty-six checks on each. oxinit compiled and ran on ARM64 unchanged, which
+is the first evidence that going through `rustix` and keeping the `unsafe` in
+one file bought what it was supposed to.
 
 ### What is implemented, and why that is different
 
