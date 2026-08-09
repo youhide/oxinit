@@ -611,6 +611,28 @@ Authorization is the socket's mode. `0600`, owned by root, in a root-owned
 directory. There is no in-protocol authentication and no per-command
 permissions. Access to the socket is full control of the machine.
 
+**Nothing blocks.** A client connection is registered with epoll like every
+other descriptor, so a client that connects and then says nothing costs a slot
+and no time at all. One request per connection: the reply goes back and the
+connection closes, which is why nothing has to remember anything between
+messages.
+
+There is a cap on concurrent clients. A client that never sends holds its slot
+until it goes away, and that is bounded and only reachable by someone who can
+already open this socket — which is to say someone who already has full
+control. A timer to evict them would be machinery guarding nothing.
+
+**Every answer is immediate, and says what was asked for rather than what has
+finished.** A stop is not over when the reply goes out; it ends when the unit's
+cgroup empties. Holding the connection open until then would make the one
+socket that has to stay responsive wait on the slowest thing on the machine.
+
+**`reload` applies to units that are not running.** A unit that is up keeps the
+definition it was started with until it stops — rewriting it underneath a
+running process would describe something that is not what is running. A socket
+unit is not re-bound either: its descriptors were bound and registered with
+epoll once, at boot.
+
 ## Workspace layout
 
 ```

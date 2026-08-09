@@ -139,6 +139,11 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
         ),
     }
 
+    // The client. Part of the system, unlike the fixtures below.
+    if let Ok(binary) = build_package("oxctl") {
+        install(&binary, &staging.join("bin/oxctl"))?;
+    }
+
     // Test fixtures. Only useful in a test image, and only there because
     // nothing in busybox sends a unix datagram or speaks LISTEN_FDS.
     for fixture in ["notify-probe", "listen-probe"] {

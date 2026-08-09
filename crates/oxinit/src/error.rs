@@ -69,6 +69,9 @@ pub enum Error {
         #[source]
         source: rustix::io::Errno,
     },
+
+    #[error("control socket: {0}")]
+    Control(#[source] rustix::io::Errno),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

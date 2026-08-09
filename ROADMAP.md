@@ -226,10 +226,10 @@ Nothing needs it yet.
       mapped to explicit actions. PID 1 has no default dispositions, so an
       unhandled signal does nothing.
 - [x] Final `sync`, remount read-only, `reboot(2)` with the right command.
-- [ ] Control socket: `SOCK_SEQPACKET` at `/run/oxinit/control.sock`, mode
+- [x] Control socket: `SOCK_SEQPACKET` at `/run/oxinit/control.sock`, mode
       `0600`.
-- [ ] `oxinit-ipc` request and response types, JSON on the wire.
-- [ ] `oxctl`: `start`, `stop`, `restart`, `status`, `list`, `reload`.
+- [x] `oxinit-ipc` request and response types, JSON on the wire.
+- [x] `oxctl`: `start`, `stop`, `restart`, `status`, `list`, `reload`.
 - [ ] `cargo xtask test-boot` — boot with a timeout, assert on serial output.
 - [x] `init.scope`: move PID 1 into a leaf cgroup before delegating
       controllers.
