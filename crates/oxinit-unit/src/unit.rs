@@ -1,8 +1,8 @@
 //! The unit model, and TOML into it.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::error::UnitError;
@@ -40,6 +40,42 @@ pub enum Kind {
     Service(Service),
     /// A named group of dependencies. Runs no process, owns no cgroup.
     Target,
+    /// Listening descriptors, and the service they belong to. Runs no process
+    /// and owns no cgroup either; the service it activates does both.
+    Socket(Socket),
+}
+
+/// Default `listen(2)` backlog.
+const DEFAULT_BACKLOG: u32 = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Socket {
+    /// One descriptor per entry, in this order, which is the order the service
+    /// receives them in.
+    pub listen: Vec<Listen>,
+    /// The service to start when a connection arrives.
+    pub service: String,
+    pub ty: SocketType,
+    pub backlog: u32,
+}
+
+/// One address to bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listen {
+    /// A literal IP and port. Never a hostname: PID 1 does not do DNS, and a
+    /// boot that waits on a resolver is a boot that hangs when it is down.
+    Inet(SocketAddr),
+    /// An absolute path.
+    Unix(String),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SocketType {
+    #[default]
+    Stream,
+    Datagram,
+    Seqpacket,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +127,7 @@ impl Unit {
         let suffix = match self.kind {
             Kind::Service(_) => "service",
             Kind::Target => "target",
+            Kind::Socket(_) => "socket",
         };
         format!("{}.{}", self.name, suffix)
     }
@@ -98,7 +135,14 @@ impl Unit {
     pub fn service(&self) -> Option<&Service> {
         match &self.kind {
             Kind::Service(service) => Some(service),
-            Kind::Target => None,
+            _ => None,
+        }
+    }
+
+    pub fn socket(&self) -> Option<&Socket> {
+        match &self.kind {
+            Kind::Socket(socket) => Some(socket),
+            _ => None,
         }
     }
 }
@@ -112,7 +156,7 @@ struct RawFile {
     unit: Option<RawUnit>,
     service: Option<RawService>,
     target: Option<RawTarget>,
-    socket: Option<IgnoredAny>,
+    socket: Option<RawSocket>,
     resources: Option<RawResources>,
 }
 
@@ -152,6 +196,16 @@ struct RawTarget {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawSocket {
+    listen: Vec<String>,
+    service: String,
+    #[serde(rename = "type")]
+    ty: Option<SocketType>,
+    backlog: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawResources {
     memory_max: Option<SizeValue>,
     tasks_max: Option<u64>,
@@ -169,12 +223,6 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
         message: source.to_string(),
     })?;
 
-    if raw.socket.is_some() {
-        return Err(UnitError::SocketReserved {
-            unit: name.to_owned(),
-        });
-    }
-
     let meta = raw.unit.unwrap_or_default();
     let deps = Deps {
         requires: meta.requires,
@@ -191,7 +239,32 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
         });
     }
 
-    let kind = match (raw.service, raw.target) {
+    // Exactly one kind section, counted rather than matched: three optional
+    // sections is eight cases, and seven of them are the same error.
+    let sections = usize::from(raw.service.is_some())
+        + usize::from(raw.target.is_some())
+        + usize::from(raw.socket.is_some());
+
+    if sections == 0 {
+        return Err(UnitError::NoKind {
+            unit: name.to_owned(),
+        });
+    }
+    if sections > 1 {
+        return Err(UnitError::MultipleKinds {
+            unit: name.to_owned(),
+        });
+    }
+
+    // Only a service has a process to limit, so anything else carrying
+    // [resources] is an error rather than a silent no-op.
+    if raw.service.is_none() && raw.resources.is_some() {
+        return Err(UnitError::ResourcesOnNonService {
+            unit: name.to_owned(),
+        });
+    }
+
+    let kind = match (raw.service, raw.socket) {
         (Some(service), None) => {
             let user = service.user.unwrap_or_else(|| "root".to_owned());
             let ty = service.ty.unwrap_or_default();
@@ -236,27 +309,44 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
             })
         }
 
-        (None, Some(RawTarget {})) => {
-            // A target has no process, so a resource limit on it would be a
-            // limit on nothing. An error rather than a silent no-op.
-            if raw.resources.is_some() {
-                return Err(UnitError::ResourcesOnNonService {
+        (None, Some(socket)) => {
+            let ty = socket.ty.unwrap_or_default();
+
+            if socket.listen.is_empty() {
+                return Err(UnitError::EmptyListen {
                     unit: name.to_owned(),
                 });
             }
-            Kind::Target
+
+            // A datagram socket is never listen()ed on, so a backlog for it
+            // is a value that would be read and thrown away.
+            if socket.backlog.is_some() && ty == SocketType::Datagram {
+                return Err(UnitError::BacklogOnDatagram {
+                    unit: name.to_owned(),
+                });
+            }
+
+            let listen = socket
+                .listen
+                .iter()
+                .map(|address| {
+                    parse_listen(address).ok_or_else(|| UnitError::ListenAddress {
+                        unit: name.to_owned(),
+                        address: address.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Kind::Socket(Socket {
+                listen,
+                service: socket.service,
+                ty,
+                backlog: socket.backlog.unwrap_or(DEFAULT_BACKLOG),
+            })
         }
 
-        (None, None) => {
-            return Err(UnitError::NoKind {
-                unit: name.to_owned(),
-            })
-        }
-        (Some(_), Some(_)) => {
-            return Err(UnitError::MultipleKinds {
-                unit: name.to_owned(),
-            })
-        }
+        // Counted above, so the only combination left is the target.
+        _ => Kind::Target,
     };
 
     Ok(Unit {
@@ -265,6 +355,25 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
         deps,
         kind,
     })
+}
+
+/// One `listen` entry: an absolute path, or a literal address and port.
+///
+/// Hostnames are rejected rather than resolved. PID 1 does not do DNS, and a
+/// boot that waits on a resolver is a boot that hangs when the resolver is
+/// down — which, on a machine this is the init of, it will be.
+///
+/// A bare port is rejected too. `0.0.0.0:22` and `[::]:22` are different
+/// requests, and guessing which one `22` meant is how a service ends up
+/// reachable on an interface nobody intended.
+fn parse_listen(address: &str) -> Option<Listen> {
+    if address.starts_with('/') {
+        return Some(Listen::Unix(address.to_owned()));
+    }
+
+    // `SocketAddr` accepts exactly what is documented: `1.2.3.4:80` and
+    // `[::1]:80`, and nothing that needs resolving.
+    address.parse().ok().map(Listen::Inet)
 }
 
 /// Names must be usable as a filename component and as a cgroup path segment.
@@ -390,16 +499,105 @@ tasks-max  = 512
         assert!(parse("x", "[unit]\ndescription = \"nothing\"\n", "h").is_err());
         assert!(parse("x", "", "h").is_err(), "empty file has no kind");
         assert!(parse("x", "[service]\nexec = \"/bin/true\"\n[target]\n", "h").is_err());
+
+        let socket = "[socket]\nlisten = [\"/run/x\"]\nservice = \"y\"\n";
+        assert!(parse("x", &format!("{socket}[target]\n"), "h").is_err());
+        assert!(
+            parse(
+                "x",
+                &format!("{socket}[service]\nexec = \"/bin/true\"\n"),
+                "h"
+            )
+            .is_err(),
+            "a socket unit is not also a service unit"
+        );
     }
 
     #[test]
-    fn rejects_socket_units_until_m4() {
-        assert!(parse("x", "[socket]\nlisten = \"0.0.0.0:22\"\n", "h").is_err());
+    fn parses_the_documented_socket() {
+        let text = "\
+[unit]
+description = \"OpenSSH socket\"
+
+[socket]
+listen  = [\"0.0.0.0:22\", \"[::]:22\", \"/run/sshd.sock\"]
+service = \"sshd\"
+type    = \"stream\"
+backlog = 64
+";
+        let unit = parse_ok("sshd-socket", text);
+        assert_eq!(unit.full_name(), "sshd-socket.socket");
+        assert!(unit.service().is_none());
+
+        let socket = unit.socket().unwrap();
+        assert_eq!(socket.service, "sshd");
+        assert_eq!(socket.ty, SocketType::Stream);
+        assert_eq!(socket.backlog, 64);
+        assert_eq!(
+            socket.listen,
+            [
+                Listen::Inet("0.0.0.0:22".parse().unwrap()),
+                Listen::Inet("[::]:22".parse().unwrap()),
+                Listen::Unix("/run/sshd.sock".to_owned()),
+            ],
+            "order is preserved: it is the order the service gets the fds in"
+        );
     }
 
     #[test]
-    fn rejects_resources_on_a_target() {
+    fn socket_defaults() {
+        let unit = parse_ok("s", "[socket]\nlisten = [\"/run/x\"]\nservice = \"x\"\n");
+        let socket = unit.socket().unwrap();
+        assert_eq!(socket.ty, SocketType::Stream);
+        assert_eq!(socket.backlog, DEFAULT_BACKLOG);
+    }
+
+    #[test]
+    fn a_socket_needs_somewhere_to_listen_and_something_to_start() {
+        assert!(parse("s", "[socket]\nlisten = []\nservice = \"x\"\n", "h").is_err());
+        assert!(parse("s", "[socket]\nservice = \"x\"\n", "h").is_err());
+        assert!(parse("s", "[socket]\nlisten = [\"/run/x\"]\n", "h").is_err());
+    }
+
+    #[test]
+    fn rejects_listen_addresses_that_would_have_to_be_guessed_at() {
+        let bad = |address: &str| {
+            let text = format!("[socket]\nlisten = [\"{address}\"]\nservice = \"x\"\n");
+            parse("s", &text, "h").is_err()
+        };
+
+        assert!(bad("22"), "a bare port does not say which interface");
+        assert!(bad("localhost:22"), "no DNS in PID 1");
+        assert!(bad("example.com:80"));
+        assert!(bad("run/x.sock"), "a unix path must be absolute");
+        assert!(bad("0.0.0.0"), "no port");
+        assert!(bad("::1:22"), "an IPv6 address needs brackets");
+        assert!(bad(""));
+    }
+
+    #[test]
+    fn rejects_a_backlog_on_a_datagram_socket() {
+        let text = "[socket]\nlisten = [\"0.0.0.0:69\"]\nservice = \"x\"\n\
+                    type = \"datagram\"\nbacklog = 32\n";
+        assert!(
+            parse("s", text, "h").is_err(),
+            "nothing listens on a datagram socket"
+        );
+
+        // Without the backlog it is fine.
+        let ok = "[socket]\nlisten = [\"0.0.0.0:69\"]\nservice = \"x\"\ntype = \"datagram\"\n";
+        assert_eq!(parse_ok("s", ok).socket().unwrap().ty, SocketType::Datagram);
+    }
+
+    #[test]
+    fn rejects_resources_on_anything_but_a_service() {
         assert!(parse("x", "[target]\n[resources]\ntasks-max = 10\n", "h").is_err());
+        assert!(parse(
+            "x",
+            "[socket]\nlisten = [\"/run/x\"]\nservice = \"y\"\n[resources]\ntasks-max = 10\n",
+            "h"
+        )
+        .is_err());
     }
 
     #[test]
