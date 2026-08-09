@@ -132,6 +132,7 @@ cargo test -p oxinit-timer                  # M8: schedules and the calendar
 cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
 cargo xtask test-boot --arch all            # M9: x86_64 and aarch64, in turn
 cargo xtask container                       # M6: runs it in Docker, same
+cargo xtask test-distro                     # M10: a real Alpine userspace
 ```
 
 `oxinit-unit` and `oxinit-graph` will have no Linux dependencies and will run

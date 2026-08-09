@@ -937,3 +937,15 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
   The exit code is the assertion that matters. `SIGKILL` after a grace period
   is 137, and every `docker stop` produced it until PID 1 both handled
   `SIGTERM` and exited afterwards.
+- **A real userspace.** `cargo xtask test-distro` runs the same units against
+  a distribution's own root filesystem rather than a hand-assembled one, which
+  is the only test in which the services oxinit execs are dynamically linked
+  binaries that have to find their interpreter. That goes through
+  `sys::raw::Image`, and nothing else had reached it with anything but a
+  static binary.
+
+  It arrives as an initramfs rather than a disk, and that is a property of the
+  boot chain rather than a shortcut: a distribution kernel builds its
+  filesystems and disk drivers as modules, which is what its initramfs loads
+  before it `switch_root`s. oxinit does not `switch_root`, so it is either
+  what that initramfs hands over to, or the initramfs itself.
