@@ -913,6 +913,8 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
 
 - **MSRV** — stable minus two releases. No nightly features.
 - **Targets** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
+  Both are built and booted by `cargo xtask test-boot --arch all`, which is
+  what makes "supported" a statement about something that has been run.
 - **Kernel** — 5.14 or later, for `cgroup.kill`. cgroup v2 must be available;
   the legacy v1 hierarchy is not supported.
 

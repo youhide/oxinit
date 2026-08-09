@@ -16,12 +16,20 @@ target:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-musl
 ```
 
 MSRV is stable minus two releases. No nightly features are used.
 
-**Tools.** `qemu-system-x86_64` and `cpio`. Docker or podman as well, if you
-are running `cargo xtask container`.
+**Tools.** `qemu-system-x86_64`, `qemu-system-aarch64` and `cpio`. Docker or
+podman as well, if you are running `cargo xtask container`.
+
+**Boot artifacts.** A kernel and a static busybox per architecture, under
+`target/`, where `xtask` looks for them by name — `vmlinuz-x86_64`,
+`vmlinuz-aarch64`, `busybox-x86_64`, `busybox-aarch64`. Alpine publishes both:
+a kernel under `releases/<arch>/netboot/vmlinuz-lts` and a `busybox-static`
+package under `main/<arch>/`. `--kernel` and `--shell` override, and so do
+`$OXINIT_KERNEL_<ARCH>` and `$OXINIT_SHELL_<ARCH>`.
 
 ```bash
 # Debian/Ubuntu
@@ -90,7 +98,8 @@ oxinit-graph` runs on any host with a Rust toolchain, and that is where most of
 
 Booting from macOS needs two extra pieces:
 
-- **A cross linker.** `rustup target add x86_64-unknown-linux-musl` installs the
+- **A cross linker.** `rustup target add x86_64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-musl` installs the
   standard library but not something that can link it. Use
   [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild), which needs
   only `zig`, or a `musl-cross` toolchain from Homebrew with the linker
@@ -121,6 +130,7 @@ cargo test -p oxinit-unit -p oxinit-graph   # M1: host tests, no VM
 cargo test -p oxinit-log                    # M7: records, splitting, rotation
 cargo test -p oxinit-timer                  # M8: schedules and the calendar
 cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
+cargo xtask test-boot --arch all            # M9: x86_64 and aarch64, in turn
 cargo xtask container                       # M6: runs it in Docker, same
 ```
 

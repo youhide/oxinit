@@ -11,7 +11,76 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const TARGET: &str = "x86_64-unknown-linux-musl";
+/// A target oxinit is built and booted for.
+///
+/// Both are claimed as supported. Until M9 only one had ever been compiled,
+/// which is the difference between a supported target and an assumed one.
+#[derive(Clone, Copy)]
+struct Arch {
+    /// What `--arch` takes, and what `$OXINIT_KERNEL_<ARCH>` is named after.
+    name: &'static str,
+    target: &'static str,
+    qemu: &'static str,
+    /// Extra QEMU arguments. x86_64 has a default machine that boots a kernel;
+    /// aarch64 has no such thing — `virt` is the board QEMU invented for
+    /// exactly this, and without `-cpu` it defaults to one the kernel will not
+    /// run on.
+    machine: &'static [&'static str],
+    /// What the kernel calls the serial port it is told to use. Getting this
+    /// wrong produces a boot with no output at all and nothing to say why.
+    console: &'static str,
+    /// How long `test-boot` waits. Emulating a foreign architecture has no
+    /// hardware acceleration to fall back on, and the whole boot runs through
+    /// QEMU's JIT.
+    timeout: u32,
+}
+
+const ARCHES: &[Arch] = &[
+    Arch {
+        name: "x86_64",
+        target: "x86_64-unknown-linux-musl",
+        qemu: "qemu-system-x86_64",
+        machine: &[],
+        console: "ttyS0",
+        timeout: 90,
+    },
+    Arch {
+        name: "aarch64",
+        target: "aarch64-unknown-linux-musl",
+        qemu: "qemu-system-aarch64",
+        machine: &["-M", "virt", "-cpu", "cortex-a57"],
+        console: "ttyAMA0",
+        timeout: 300,
+    },
+];
+
+/// `--arch NAME`, then `$OXINIT_ARCH`, then the host's own if it is one of
+/// them, then x86_64.
+fn find_arch(args: &[String]) -> Result<Arch, String> {
+    let wanted = match flag(args, "--arch")? {
+        Some(name) => name.to_owned(),
+        None => env::var("OXINIT_ARCH").unwrap_or_else(|_| default_arch().to_owned()),
+    };
+
+    ARCHES
+        .iter()
+        .find(|arch| arch.name == wanted)
+        .copied()
+        .ok_or_else(|| {
+            let known: Vec<&str> = ARCHES.iter().map(|arch| arch.name).collect();
+            format!("unknown --arch `{wanted}`; known: {}", known.join(", "))
+        })
+}
+
+/// Building for the host's own architecture is what a developer means by
+/// nothing, and it is the one QEMU can accelerate.
+fn default_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -20,9 +89,13 @@ fn main() {
 
     let result = match cmd.as_str() {
         "boot" => boot(&rest),
-        "build" => build().map(|path| println!("{}", path.display())),
-        "image" => image(&rest, false).map(|path| println!("{}", path.display())),
-        "test-boot" => test_boot(&rest),
+        "build" => find_arch(&rest)
+            .and_then(build)
+            .map(|path| println!("{}", path.display())),
+        "image" => find_arch(&rest)
+            .and_then(|arch| image(arch, &rest, false))
+            .map(|path| println!("{}", path.display())),
+        "test-boot" => test_boot_all(&rest),
         "container" => container(&rest),
         "" | "help" | "--help" | "-h" => {
             usage();
@@ -47,11 +120,18 @@ commands:
   test-boot  boot with a timeout and assert on the serial log
   container  build a container image, run it, and assert on its output
 
+options:
+  --arch NAME     x86_64 (default), aarch64, or `all` for test-boot, which
+                  boots every supported target in turn. Both are supported
+                  targets; the host's own is the one QEMU can accelerate.
+
 boot options:
-  --kernel PATH   kernel image; falls back to $OXINIT_KERNEL, then ./bzImage
+  --kernel PATH   kernel image; falls back to $OXINIT_KERNEL_<ARCH>, then
+                  $OXINIT_KERNEL, then target/vmlinuz-<arch>
   --shell PATH    statically linked shell to place at /bin/sh, normally
-                  busybox; falls back to $OXINIT_SHELL. Without one, the image
-                  holds only /init and oxinit has no shell to spawn.
+                  busybox; falls back to $OXINIT_SHELL_<ARCH>, then
+                  $OXINIT_SHELL. It has to match --arch. Without one, the
+                  image holds only /init and oxinit has no shell to spawn.
 
 container options:
   --engine NAME   docker (default) or podman
@@ -65,18 +145,18 @@ fn usage() {
 }
 
 /// Build a static `oxinit` and return the path to the binary.
-fn build() -> Result<PathBuf, String> {
-    build_package("oxinit")
+fn build(arch: Arch) -> Result<PathBuf, String> {
+    build_package(arch, "oxinit")
 }
 
-fn build_package(package: &str) -> Result<PathBuf, String> {
+fn build_package(arch: Arch, package: &str) -> Result<PathBuf, String> {
     run(Command::new(cargo())
-        .args(["build", "--release", "--target", TARGET, "-p", package])
+        .args(["build", "--release", "--target", arch.target, "-p", package])
         .current_dir(root()))?;
 
     let binary = root()
         .join("target")
-        .join(TARGET)
+        .join(arch.target)
         .join("release")
         .join(package);
     if !binary.exists() {
@@ -87,32 +167,39 @@ fn build_package(package: &str) -> Result<PathBuf, String> {
 
 /// Build and pack, without booting. Used by `boot`, and on its own by anything
 /// that wants to drive QEMU itself.
-fn image(args: &[String], test: bool) -> Result<PathBuf, String> {
-    let shell = find_shell(args)?;
-    let binary = build()?;
-    pack_initramfs(&binary, shell.as_deref(), test)
+fn image(arch: Arch, args: &[String], test: bool) -> Result<PathBuf, String> {
+    let shell = find_shell(arch, args)?;
+    let binary = build(arch)?;
+    pack_initramfs(arch, &binary, shell.as_deref(), test)
 }
 
 fn boot(args: &[String]) -> Result<(), String> {
-    let kernel = find_kernel(args)?;
-    let image = image(args, false)?;
+    let arch = find_arch(args)?;
+    let kernel = find_kernel(arch, args)?;
+    let image = image(arch, args, false)?;
 
     println!(
-        "xtask: booting {} with {}",
+        "xtask: booting {} on {} with {}",
         image.display(),
+        arch.name,
         kernel.display()
     );
     println!("xtask: Ctrl-A X to exit QEMU");
 
-    run(Command::new("qemu-system-x86_64").args([
+    let mut command = Command::new(arch.qemu);
+    command.args(arch.machine).args([
         "-kernel".as_ref(),
         kernel.as_os_str(),
         "-initrd".as_ref(),
         image.as_os_str(),
         "-nographic".as_ref(),
+        "-m".as_ref(),
+        "512".as_ref(),
         "-append".as_ref(),
-        "console=ttyS0".as_ref(),
-    ]))
+        format!("console={}", arch.console).as_ref(),
+    ]);
+
+    run(&mut command)
 }
 
 /// Lines the serial log must contain, and what each one proves.
@@ -208,27 +295,68 @@ const EXPECTED: &[(&str, &str)] = &[
 /// `output = "log"` wrote to the console instead.
 const FORBIDDEN: &[&str] = &["panicked", "Kernel panic", "can't access tty", "chatty-out"];
 
-/// Hard limit on the whole boot. A test that hangs has to fail, not block.
-const TEST_TIMEOUT: u32 = 90;
+/// `--arch all` boots every supported target, one after the other.
+///
+/// The point of the milestone that added it: "supported" is a claim about
+/// something that has been run, and one command that runs all of them is what
+/// keeps that true. Sequential rather than concurrent — two emulated machines
+/// on one host contend for the same cores and neither result means anything
+/// about the other.
+fn test_boot_all(args: &[String]) -> Result<(), String> {
+    if flag(args, "--arch")? != Some("all") {
+        return test_boot(find_arch(args)?, args);
+    }
+
+    // A kernel and a shell are each for one architecture, so a single value
+    // cannot mean anything across all of them. Refused rather than applied to
+    // the first and silently wrong for the rest.
+    for name in ["--kernel", "--shell"] {
+        if flag(args, name)?.is_some() {
+            return Err(format!(
+                "{name} names one architecture's file; with `--arch all` use \
+                 $OXINIT_KERNEL_<ARCH> and $OXINIT_SHELL_<ARCH>, or the \
+                 defaults under target/"
+            ));
+        }
+    }
+
+    let mut failures = Vec::new();
+    for arch in ARCHES {
+        println!("\nxtask: === {} ===", arch.name);
+        if let Err(e) = test_boot(*arch, args) {
+            failures.push(format!("{}: {e}", arch.name));
+        }
+    }
+
+    if failures.is_empty() {
+        println!("\nxtask: every architecture booted");
+        return Ok(());
+    }
+
+    Err(failures.join("\n"))
+}
 
 /// Boot under QEMU, with a timeout, and assert on what came out of the serial
 /// port.
-fn test_boot(args: &[String]) -> Result<(), String> {
-    let kernel = find_kernel(args)?;
-    let image = image(args, true)?;
+fn test_boot(arch: Arch, args: &[String]) -> Result<(), String> {
+    let kernel = find_kernel(arch, args)?;
+    let image = image(arch, args, true)?;
 
-    let log = root().join("target/test-boot.log");
+    let log = root().join(format!("target/test-boot-{}.log", arch.name));
     let _ = fs::remove_file(&log);
 
     println!(
-        "xtask: booting with a {TEST_TIMEOUT}s limit, logging to {}",
+        "xtask: booting {} with a {}s limit, logging to {}",
+        arch.name,
+        arch.timeout,
         log.display()
     );
 
     // `-serial file:` rather than -nographic, so the log is a file this can
     // read rather than this process's own stdout. `-display none` keeps QEMU
     // from opening a window on a developer's machine.
-    let mut child = Command::new("qemu-system-x86_64")
+    let mut child = Command::new(arch.qemu)
+        .args(arch.machine)
         .args([
             "-kernel".as_ref(),
             kernel.as_os_str(),
@@ -239,24 +367,27 @@ fn test_boot(args: &[String]) -> Result<(), String> {
             "-serial".as_ref(),
             format!("file:{}", log.display()).as_ref(),
             "-append".as_ref(),
-            "console=ttyS0".as_ref(),
+            format!("console={}", arch.console).as_ref(),
             "-m".as_ref(),
             "512".as_ref(),
         ])
         .spawn()
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "qemu-system-x86_64 not found; is it installed?".into(),
-            _ => format!("run qemu-system-x86_64: {e}"),
+            std::io::ErrorKind::NotFound => {
+                format!("{} not found; is it installed?", arch.qemu)
+            }
+            _ => format!("run {}: {e}", arch.qemu),
         })?;
 
-    let clean = wait_for(&mut child, TEST_TIMEOUT)?;
+    let clean = wait_for(&mut child, arch.timeout)?;
     let text = fs::read_to_string(&log).map_err(|e| format!("read {}: {e}", log.display()))?;
 
     let failures = if clean {
         Vec::new()
     } else {
         vec![format!(
-            "qemu had to be killed after {TEST_TIMEOUT}s: the machine never powered off"
+            "qemu had to be killed after {}s: the machine never powered off",
+            arch.timeout
         )]
     };
 
@@ -397,13 +528,14 @@ fn container(args: &[String]) -> Result<(), String> {
     let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
     let privileged = args.iter().any(|arg| arg == "--privileged");
 
-    let shell = find_shell(args)?;
-    let binary = build()?;
+    let arch = find_arch(args)?;
+    let shell = find_shell(arch, args)?;
+    let binary = build(arch)?;
 
     // `false`, unlike `test-boot`: no unit that ends the test by signalling
     // PID 1, because what ends this one is the runtime's stop — which is the
     // thing being tested.
-    let staging = stage(&binary, shell.as_deref(), false)?;
+    let staging = stage(arch, &binary, shell.as_deref(), false)?;
     let dockerfile = write_dockerfile()?;
 
     println!("xtask: building {CONTAINER_IMAGE} with {engine}");
@@ -600,8 +732,8 @@ fn remove(engine: &str) {
 /// describes.
 fn write_dockerfile() -> Result<PathBuf, String> {
     const DOCKERFILE: &str = "\
-# Written by `cargo xtask container`. The build context is target/initramfs,
-# the same tree `cargo xtask boot` packs into a cpio.
+# Written by `cargo xtask container`. The build context is the same staged
+# tree `cargo xtask boot` packs into a cpio.
 FROM scratch
 COPY . /
 ENTRYPOINT [\"/init\"]
@@ -613,9 +745,14 @@ ENTRYPOINT [\"/init\"]
 }
 
 /// Pack the staged tree into a cpio initramfs.
-fn pack_initramfs(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
-    let staging = stage(binary, shell, test)?;
-    let image = root().join("target/oxinit.cpio.gz");
+fn pack_initramfs(
+    arch: Arch,
+    binary: &Path,
+    shell: Option<&Path>,
+    test: bool,
+) -> Result<PathBuf, String> {
+    let staging = stage(arch, binary, shell, test)?;
+    let image = root().join(format!("target/oxinit-{}.cpio.gz", arch.name));
 
     // bsdcpio and GNU cpio both accept `-o -H newc`, which is the format the
     // kernel's initramfs unpacker reads.
@@ -645,17 +782,21 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>, test: bool) -> Result<Pat
 /// `$OXINIT_SHELL`) adds a statically linked shell, normally busybox, at
 /// `/bin/sh`. Without it the boot still proves the mount, console, signalfd,
 /// and reap paths, which is most of M0.
-fn stage(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
-    let staging = root().join("target/initramfs");
+fn stage(arch: Arch, binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
+    let staging = root().join(format!("target/initramfs-{}", arch.name));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("create {}: {e}", staging.display()))?;
 
     install(binary, &staging.join("init"))?;
 
+    // Unconditionally, because the client and the fixtures below go here too.
+    // Created only alongside a shell, an image built without one failed on the
+    // first thing that tried to land in it.
+    let bin = staging.join("bin");
+    fs::create_dir_all(&bin).map_err(|e| format!("create {}: {e}", bin.display()))?;
+
     match shell {
         Some(path) => {
-            let bin = staging.join("bin");
-            fs::create_dir_all(&bin).map_err(|e| format!("create {}: {e}", bin.display()))?;
             install(path, &bin.join("sh"))?;
 
             if is_busybox(path) {
@@ -671,14 +812,14 @@ fn stage(binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, Str
     // The client and the log writer. Part of the system, unlike the fixtures
     // below.
     for program in ["oxctl", "oxlogd"] {
-        let binary = build_package(program)?;
+        let binary = build_package(arch, program)?;
         install(&binary, &staging.join("bin").join(program))?;
     }
 
     // Test fixtures. Only useful in a test image, and only there because
     // nothing in busybox sends a unix datagram or speaks LISTEN_FDS.
     for fixture in ["notify-probe", "listen-probe"] {
-        if let Ok(binary) = build_package(fixture) {
+        if let Ok(binary) = build_package(arch, fixture) {
             install(&binary, &staging.join("bin").join(fixture))?;
         }
     }
@@ -840,12 +981,20 @@ fn install(from: &Path, to: &Path) -> Result<(), String> {
 
 /// The shell to place at `/bin/sh`, if any. Optional by design — see
 /// [`pack_initramfs`].
-fn find_shell(args: &[String]) -> Result<Option<PathBuf>, String> {
+fn find_shell(arch: Arch, args: &[String]) -> Result<Option<PathBuf>, String> {
+    // Arch-suffixed first. A shell is a binary for one architecture, and
+    // silently packing an x86_64 busybox into an aarch64 image produces a boot
+    // where every unit fails to exec and nothing says why.
     let path = match flag(args, "--shell")? {
         Some(path) => PathBuf::from(path),
-        None => match env::var("OXINIT_SHELL") {
-            Ok(path) => PathBuf::from(path),
-            Err(_) => return Ok(None),
+        None => match per_arch(arch, "OXINIT_SHELL") {
+            Some(path) => path,
+            // Same fallback as the kernel, and for the same reason: two
+            // architectures in one tree means two files, named after which.
+            None => match in_tree(format!("target/busybox-{}", arch.name)) {
+                Some(path) => path,
+                None => return Ok(None),
+            },
         },
     };
 
@@ -855,24 +1004,48 @@ fn find_shell(args: &[String]) -> Result<Option<PathBuf>, String> {
     Ok(Some(path))
 }
 
-fn find_kernel(args: &[String]) -> Result<PathBuf, String> {
+/// A path under the workspace root, if something is actually there.
+fn in_tree(relative: String) -> Option<PathBuf> {
+    let path = root().join(relative);
+    path.exists().then_some(path)
+}
+
+/// `$OXINIT_<NAME>_<ARCH>`, then `$OXINIT_<NAME>`.
+///
+/// The suffixed form is what makes two architectures usable from one shell
+/// session; the bare one is what a single-architecture setup already has.
+fn per_arch(arch: Arch, name: &str) -> Option<PathBuf> {
+    let suffixed = format!("{name}_{}", arch.name.to_uppercase());
+
+    env::var(&suffixed)
+        .or_else(|_| env::var(name))
+        .ok()
+        .map(PathBuf::from)
+}
+
+fn find_kernel(arch: Arch, args: &[String]) -> Result<PathBuf, String> {
     if let Some(path) = flag(args, "--kernel")? {
         return Ok(PathBuf::from(path));
     }
 
-    if let Ok(path) = env::var("OXINIT_KERNEL") {
-        return Ok(PathBuf::from(path));
+    if let Some(path) = per_arch(arch, "OXINIT_KERNEL") {
+        return Ok(path);
     }
 
-    let default = root().join("bzImage");
-    if default.exists() {
-        return Ok(default);
+    // A kernel is for one architecture too, so the fallback in the tree is
+    // named after it rather than being one file two arches fight over.
+    if let Some(path) = in_tree(format!("target/vmlinuz-{}", arch.name)) {
+        return Ok(path);
     }
+    let default = root().join(format!("target/vmlinuz-{}", arch.name));
 
     Err(format!(
-        "no kernel image. Pass --kernel PATH, set $OXINIT_KERNEL, or put a \
-         bzImage at {}.\nOn Linux the running kernel is usually at \
-         /boot/vmlinuz-$(uname -r).",
+        "no {} kernel image. Pass --kernel PATH, set $OXINIT_KERNEL_{} or \
+         $OXINIT_KERNEL, or put one at {}.\nOn Linux the running kernel is \
+         usually at /boot/vmlinuz-$(uname -r); Alpine publishes both \
+         architectures under releases/<arch>/netboot/.",
+        arch.name,
+        arch.name.to_uppercase(),
         default.display()
     ))
 }

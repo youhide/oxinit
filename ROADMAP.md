@@ -543,11 +543,56 @@ Deferred out of M8: `persistent`, which would catch up a firing missed while
 the machine was off. It needs state on disk that survives a boot, and where
 that state lives is a bigger question than the feature.
 
-## Beyond M8
+## M9 — aarch64
+
+**Done.**
+
+README and ARCHITECTURE both listed `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl` as the supported targets. One of them had never
+been compiled, let alone booted. "Supported" is a claim about something that
+has been run.
+
+- [x] `xtask` knows about architectures rather than one hard-coded triple:
+      the Rust target, the QEMU binary, the machine, and what the kernel calls
+      the serial port.
+- [x] `--arch aarch64`, and `--arch all` for `test-boot`.
+- [x] Per-architecture artifacts, defaults and environment variables, so two
+      targets can live in one tree without one silently getting the other's
+      kernel or the other's busybox.
+- [x] The whole boot suite, run on both.
+
+**It compiled and booted unchanged.** Every one of the twenty-six checks
+passes on ARM64 — the mounts, the signalfd, cgroup placement between fork and
+exec, the privilege drop, socket activation and `LISTEN_PID`, `cgroup.kill`,
+log shipping over `SCM_RIGHTS`, timers, and the ordered shutdown. That is the
+result, and it is worth stating plainly rather than dressing up: the
+portability came from going through `rustix` and keeping the `unsafe` in one
+file, and this is the first evidence that it actually worked.
+
+Three things had to change, and none of them were in oxinit:
+
+- `-M virt -cpu cortex-a57`. x86_64 has a default machine that boots a kernel
+  and aarch64 has no such thing; `virt` is the board QEMU invented for exactly
+  this, and the default CPU is one the kernel will not run on.
+- `console=ttyAMA0`, not `ttyS0`. The wrong one produces a boot with no output
+  at all and nothing to say why.
+- A 300-second budget instead of 90. Emulating a foreign architecture has no
+  hardware acceleration to fall back on and the whole boot runs through QEMU's
+  JIT.
+
+A bug found on the way, and not an aarch64 one: an image built without a
+shell failed while installing `oxctl`, because `bin/` was only created in the
+branch that had a shell to put in it. Every previous run had passed `--shell`.
+
+Verified: `cargo xtask test-boot --arch all`, 26 checks on each, against an
+Alpine 6.12 LTS kernel for each architecture. The aarch64 guest reports
+`Machine model: linux,dummy-virt` and a kernel built on `build-3-22-aarch64`,
+so it is genuinely a second architecture and not the first one relabelled.
+
+## Beyond M9
 
 Not planned, not designed, listed only so the questions have an answer:
 
-- `aarch64-unknown-linux-musl` as a tested target rather than an assumed one.
 - A `CLOCK_REALTIME` timerfd with `TFD_TIMER_CANCEL_ON_SET`, so a calendar
   schedule survives the clock being stepped under it. Until then a wall-clock
   firing is computed as a monotonic delay and an NTP correction moves it by
