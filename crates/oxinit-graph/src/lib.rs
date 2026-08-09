@@ -56,6 +56,12 @@ pub enum GraphError {
 
     #[error("units `{a}` and `{b}` conflict, and both are required")]
     ConflictingRequired { a: String, b: String },
+
+    #[error("socket `{unit}` activates `{missing}`, which does not exist")]
+    MissingSocketService { unit: String, missing: String },
+
+    #[error("socket `{unit}` activates `{other}`, which is not a service")]
+    SocketServiceNotAService { unit: String, other: String },
 }
 
 /// Resolve the units reachable from `default` into a start order.
@@ -74,9 +80,45 @@ pub fn resolve_from(units: &BTreeMap<String, Unit>, root: &str) -> Result<Plan, 
     let wanted = reachable(units, root, &mut warnings)?;
 
     check_conflicts(units, &wanted)?;
+    check_sockets(units, &wanted)?;
     let order = topological_order(units, &wanted, &mut warnings)?;
 
     Ok(Plan { order, warnings })
+}
+
+/// A socket unit must activate a service that exists.
+///
+/// Fatal, like a missing `requires` and unlike a missing `wants`: a socket
+/// whose service is not installed binds a port that can never be answered,
+/// which is worse than not binding it. The service is looked up in the whole
+/// unit set rather than in `wanted`, because a socket-activated service is
+/// normally *not* reachable from `default` — that is the point of it.
+fn check_sockets(
+    units: &BTreeMap<String, Unit>,
+    wanted: &BTreeSet<String>,
+) -> Result<(), GraphError> {
+    for name in wanted {
+        let Some(socket) = units.get(name).and_then(Unit::socket) else {
+            continue;
+        };
+
+        match units.get(&socket.service) {
+            None => {
+                return Err(GraphError::MissingSocketService {
+                    unit: name.clone(),
+                    missing: socket.service.clone(),
+                })
+            }
+            Some(unit) if unit.service().is_none() => {
+                return Err(GraphError::SocketServiceNotAService {
+                    unit: name.clone(),
+                    other: socket.service.clone(),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Everything pulled in from `root` through `requires` and `wants`.
@@ -188,6 +230,24 @@ fn topological_order(
                 continue;
             }
             add_edge(wanted, name, dep, &mut successors, &mut in_degree);
+        }
+
+        // A socket is implicitly ordered before the service it activates. If
+        // both are started at boot, the descriptors have to be bound before
+        // the service runs, or handing them to it would mean nothing.
+        //
+        // Implicit, unlike everything else here, because there is no
+        // configuration in which the other order is what anyone wanted. The
+        // edge is inert when the service is not being started at boot, which
+        // is the normal case for socket activation.
+        if let Some(socket) = unit.socket() {
+            add_edge(
+                wanted,
+                name,
+                &socket.service,
+                &mut successors,
+                &mut in_degree,
+            );
         }
     }
 

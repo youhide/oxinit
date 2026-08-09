@@ -1,0 +1,11 @@
+# The socket half of a socket-activated pair. oxinit binds this at boot; the
+# service does not run until something connects.
+#
+# The name is not `echo`: unit names are unique across kinds, so a socket and
+# its service cannot share one. `service` says which unit to start.
+[unit]
+description = "Echo socket"
+
+[socket]
+listen  = ["/run/echo.sock"]
+service = "echo"

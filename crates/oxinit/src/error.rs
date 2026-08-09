@@ -62,6 +62,13 @@ pub enum Error {
 
     #[error("cgroup: {0}")]
     Cgroup(#[source] oxinit_cgroup::CgroupError),
+
+    #[error("listen on {address}: {source}")]
+    Listen {
+        address: String,
+        #[source]
+        source: rustix::io::Errno,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

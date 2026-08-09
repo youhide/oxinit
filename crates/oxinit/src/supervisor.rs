@@ -1,6 +1,7 @@
 //! Loading units, starting them in order, and keeping them running.
 
 use std::collections::BTreeMap;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::process::{Child, Command};
 use std::time::Duration;
 
@@ -11,9 +12,11 @@ use oxinit_service::{Exit, Instance, State, StopCause};
 use oxinit_unit::{Kind, Resources, ServiceType, Unit};
 
 use crate::cgroup::{self, Cgroups};
+use crate::event::{EventLoop, Source};
+use crate::listen::Sockets;
 use crate::notify::{self, Notify};
 use crate::reap;
-use crate::sys::raw::{setup_child, ChildSetup};
+use crate::sys::raw::{setup_child, ChildSetup, Image, FIRST_LISTEN_FD};
 use crate::timer::{Alarm, Timers};
 
 pub struct Supervisor {
@@ -23,6 +26,7 @@ pub struct Supervisor {
     pub timers: Timers,
     pub notify: Notify,
     pub cgroups: Cgroups,
+    pub sockets: Sockets,
 }
 
 impl Supervisor {
@@ -45,6 +49,7 @@ impl Supervisor {
                 timers,
                 notify,
                 cgroups,
+                sockets: Sockets::new(),
             };
         }
 
@@ -69,19 +74,21 @@ impl Supervisor {
             timers,
             notify,
             cgroups,
+            sockets: Sockets::new(),
         };
 
-        for name in supervisor.order.clone() {
-            let Some(unit) = loaded.units.get(&name) else {
-                continue;
-            };
-
+        // An instance for every unit that loaded, not just the ones in the
+        // start order. A socket-activated service is deliberately unreachable
+        // from `default` — that is what stops it starting at boot — but it
+        // still needs somewhere to keep its state and a cgroup to run in when
+        // a connection finally arrives.
+        for (name, unit) in &loaded.units {
             // Every cgroup is created now, before anything starts, so the
             // whole set of `cgroup.events` descriptors can be registered with
             // epoll in one pass and never touched again. A restart reuses the
             // cgroup rather than churning the hierarchy and the registration.
             if matches!(unit.kind, Kind::Service(_)) {
-                if let Err(e) = supervisor.cgroups.add(&name, &unit.full_name()) {
+                if let Err(e) = supervisor.cgroups.add(name, &unit.full_name()) {
                     eprintln!("oxinit: {name}: {e}");
                 }
             }
@@ -89,6 +96,18 @@ impl Supervisor {
             supervisor
                 .instances
                 .insert(name.clone(), Instance::new(unit.clone()));
+        }
+
+        // Bound in start order, so `listen` order within a unit and resolved
+        // order between units decides which descriptor is fd 3.
+        for name in &supervisor.order.clone() {
+            let Some(socket) = loaded.units.get(name).and_then(Unit::socket) else {
+                continue;
+            };
+
+            for failure in supervisor.sockets.bind(name, socket) {
+                eprintln!("oxinit: {name}: {failure}");
+            }
         }
 
         supervisor
@@ -116,6 +135,19 @@ impl Supervisor {
             return;
         }
 
+        // A socket unit's descriptors were bound before anything started, so
+        // reaching it in the order is only the announcement. Units ordered
+        // after it can rely on the addresses being bound, which is the point
+        // of binding them this early.
+        if matches!(instance.unit.kind, Kind::Socket(_)) {
+            instance.entered_active();
+            println!(
+                "oxinit: listening for {name} on {}",
+                self.sockets.addresses(name).join(", ")
+            );
+            return;
+        }
+
         let ty = instance.unit.service().map(|service| service.ty);
         let resources = instance
             .unit
@@ -135,14 +167,16 @@ impl Supervisor {
             return;
         }
 
+        let listen = self.sockets.for_service(name);
         let spawned = self
             .instances
             .get(name)
-            .map(|instance| spawn(&instance.unit, cgroup));
+            .map(|instance| spawn(&instance.unit, cgroup, &listen));
 
         let Some(spawned) = spawned else {
             return;
         };
+        drop(listen);
 
         let Some(instance) = self.instances.get_mut(name) else {
             return;
@@ -488,6 +522,72 @@ impl Supervisor {
         }
     }
 
+    /// A connection arrived on a socket unit's descriptor.
+    ///
+    /// Nothing is accepted here. oxinit starts the service; the service does
+    /// the accepting, and the connection is still queued in the kernel when it
+    /// gets there.
+    pub fn on_socket(&mut self, id: u32) {
+        let Some(service) = self.sockets.service(id).map(str::to_owned) else {
+            return;
+        };
+        let address = self.sockets.address(id).unwrap_or("?").to_owned();
+
+        let idle = self
+            .instances
+            .get(&service)
+            .is_some_and(|instance| is_idle(instance.state));
+
+        if !idle {
+            // The service is already coming up, and the descriptor stops being
+            // watched a moment from now. Nothing to do.
+            return;
+        }
+
+        println!("oxinit: connection on {address}; starting {service}");
+        self.start(&service);
+    }
+
+    /// Watch a socket unit's descriptors exactly when its service is down.
+    ///
+    /// A reconciliation pass rather than an arm/disarm call at every place a
+    /// service changes state. There are a dozen of those and the cost of
+    /// forgetting one is either a service that can never be activated again or
+    /// an event loop spinning at full speed on a connection nobody accepted.
+    ///
+    /// Cheap: a handful of descriptors, and epoll is only touched when the
+    /// answer actually changed.
+    pub fn sync_sockets(&mut self, events: &EventLoop) {
+        for (id, service) in self.sockets.ids() {
+            let want = self
+                .instances
+                .get(&service)
+                .is_some_and(|instance| is_idle(instance.state));
+
+            if want == self.sockets.armed(id) {
+                continue;
+            }
+
+            let Some(fd) = self.sockets.fd(id) else {
+                continue;
+            };
+
+            let result = if want {
+                events.register(fd, Source::Socket(id))
+            } else {
+                // Not closed. The descriptor is the service's across every
+                // restart it makes; connections queue in the kernel rather
+                // than being refused.
+                events.deregister(fd)
+            };
+
+            match result {
+                Ok(()) => self.sockets.set_armed(id, want),
+                Err(e) => eprintln!("oxinit: {service}: {e}"),
+            }
+        }
+    }
+
     /// What the unit's cgroup is currently using.
     ///
     /// Read on demand and only where it is about to be printed. Nothing polls
@@ -610,8 +710,23 @@ fn terminate(pid: u32) -> bool {
         .is_some_and(|pid| rustix::process::kill_process(pid, Signal::TERM).is_ok())
 }
 
+/// A unit that is not running, so a connection on its socket should start it.
+///
+/// `Restarting` is deliberately not idle: it is already on its way back, and a
+/// second start would be a second process.
+fn is_idle(state: State) -> bool {
+    matches!(state, State::Inactive | State::Failed)
+}
+
 /// Spawn one service's main process.
-fn spawn(unit: &Unit, cgroup: Option<&Cgroup>) -> Result<Child, String> {
+///
+/// `listen` is the descriptors it inherits, paired with the socket unit each
+/// one came from, in the order it receives them.
+fn spawn(
+    unit: &Unit,
+    cgroup: Option<&Cgroup>,
+    listen: &[(&str, BorrowedFd<'_>)],
+) -> Result<Child, String> {
     let service = unit.service().ok_or_else(|| "not a service".to_owned())?;
 
     // Resolved here, in the parent, because the child cannot: between fork
@@ -634,28 +749,67 @@ fn spawn(unit: &Unit, cgroup: Option<&Cgroup>) -> Result<Child, String> {
         .split_first()
         .ok_or_else(|| "empty exec".to_owned())?;
 
-    let mut command = Command::new(program);
-    command.args(args);
+    let mut env: Vec<(String, String)> = Vec::new();
 
     // The protocol is opt-in by type: a service that did not ask for it should
     // not find NOTIFY_SOCKET in its environment.
     if service.ty == ServiceType::Notify {
-        command.env("NOTIFY_SOCKET", notify::NOTIFY_PATH);
+        env.push(("NOTIFY_SOCKET".to_owned(), notify::NOTIFY_PATH.to_owned()));
 
         // Services are expected to ping at roughly half this, so the interval
         // is passed through unchanged and the halving is their business.
         if let Some(interval) = service.watchdog_sec {
-            command.env("WATCHDOG_USEC", interval.as_micros().to_string());
+            env.push(("WATCHDOG_USEC".to_owned(), interval.as_micros().to_string()));
         }
     }
+
+    let listen_fds = duplicate_listen_fds(listen)?;
+
+    if !listen_fds.is_empty() {
+        let names: Vec<&str> = listen.iter().map(|(name, _)| *name).collect();
+        env.push(("LISTEN_FDS".to_owned(), listen_fds.len().to_string()));
+        env.push(("LISTEN_FDNAMES".to_owned(), names.join(":")));
+    }
+
+    // LISTEN_PID is not in that list, because its value is the child's pid and
+    // nothing here knows it yet. The image reserves the slot; the child fills
+    // it in after the fork. See `sys::raw::Image`.
+    let image = Image::build(&service.exec, &env, !listen_fds.is_empty())
+        .ok_or_else(|| "exec or environment contains a NUL byte".to_owned())?;
+
+    let mut command = Command::new(program);
+    command.args(args);
 
     setup_child(
         &mut command,
         ChildSetup {
             cgroup_procs,
+            listen_fds,
             identity,
+            image: Some(image),
         },
     );
 
     command.spawn().map_err(|e| format!("spawn {program}: {e}"))
+}
+
+/// Copy the listening descriptors somewhere the child can move them from.
+///
+/// Duplicated to numbers at or above the range they are moving into, so the
+/// child's `dup2` sequence cannot land on a descriptor it has not read yet,
+/// and cannot be a no-op onto itself — which would leave `FD_CLOEXEC` set and
+/// close the descriptor at exec.
+///
+/// Duplicates, not the originals: oxinit keeps those, open, across every
+/// restart the service makes.
+fn duplicate_listen_fds(listen: &[(&str, BorrowedFd<'_>)]) -> Result<Vec<OwnedFd>, String> {
+    let above = FIRST_LISTEN_FD.saturating_add(i32::try_from(listen.len()).unwrap_or(i32::MAX));
+
+    listen
+        .iter()
+        .map(|(name, fd)| {
+            rustix::io::fcntl_dupfd_cloexec(fd, above)
+                .map_err(|e| format!("duplicate the descriptor from {name}: {e}"))
+        })
+        .collect()
 }

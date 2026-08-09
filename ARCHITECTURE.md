@@ -196,6 +196,17 @@ with `type = "notify"` send readiness and status here. See below.
 **cgroup.events** — one per running service cgroup, registered with `EPOLLPRI`.
 Kernel notification that the `populated` key changed. See cgroup v2 below.
 
+**Listening sockets** — one per address a socket unit binds, registered with
+`EPOLLIN` while its service is down. Readable means a connection is waiting.
+oxinit does not accept it; it starts the service, which does. See socket
+activation above.
+
+epoll hands back one `u64` per registration and nothing else, so the token has
+to carry both what kind of descriptor woke the loop and which one: the high
+half is the kind, the low half is the id. A flat numbering with reserved ranges
+would work too, right up until one range outgrew its reservation and silently
+aliased another.
+
 ## sd_notify and socket activation
 
 oxinit implements two protocols that originated in systemd:
@@ -229,6 +240,55 @@ passes them to the service as inherited descriptors starting at fd 3, with
 `LISTEN_FDNAMES` set to a colon-separated list of names. A service must check
 that `LISTEN_PID` matches its own pid before trusting `LISTEN_FDS`.
 
+The descriptors belong to oxinit and are never closed. That is what the
+feature buys:
+
+- A unit ordered after a socket can rely on the address being **bound**, which
+  is a fact. "The service started" is a guess.
+- A restart does not refuse connections. The listening socket outlives the
+  process that was serving them, so they queue in the kernel.
+- The service need not run until something wants it.
+
+**`LISTEN_PID` is why oxinit builds the child's exec image itself.** Its value
+is the pid of the process the descriptors were passed to, and that pid does not
+exist until after the `fork` — at which point nothing may allocate. So the
+argv and environment are laid out in the parent with a fixed-width gap where
+the digits go, the child writes them in, and the child execs that image
+directly from the `pre_exec` hook. `Command`'s own environment is not used at
+all; oxinit decides exactly what a service sees. See `sys::raw::Image`.
+
+`LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES`, `NOTIFY_SOCKET` and
+`WATCHDOG_USEC` are never inherited from oxinit's own environment. A service
+sees the values oxinit set for it, or nothing — a stale `LISTEN_FDS` would
+point it at a descriptor table it does not own.
+
+**Watching a socket is conditional.** A registered listening descriptor stays
+readable until someone accepts the connection, and oxinit never accepts
+anything, so a descriptor left registered after the service starts would spin
+the loop at full speed. It is therefore registered exactly while its service is
+`Inactive` or `Failed`, and deregistered — not closed — otherwise.
+
+That is done as one reconciliation pass at the end of every loop iteration
+rather than as an arm/disarm call in each of the dozen places a service can
+change state. It is idempotent, it cannot be forgotten by a path added later,
+and the cost of getting it wrong is either a service that can never be
+activated again or an event loop at 100%.
+
+**Each `listen` entry means the address it names.** IPv6 sockets get
+`IPV6_V6ONLY`, so `[::]` does not also claim every IPv4 address — without it a
+unit listing both `0.0.0.0:22` and `[::]:22` fails its second bind with
+`EADDRINUSE` for reasons nothing in the configuration explains. TCP sockets get
+`SO_REUSEADDR`, or a restart is refused for as long as the kernel holds the old
+socket in `TIME_WAIT`, which is exactly the window a service manager restarts
+things in.
+
+**A socket unit cannot share a name with its service.** Unit names are unique
+across kinds, which is what lets `requires`, `after`, and `oxctl` take a bare
+name; so the socket names its service with a required `service` key rather than
+by convention. A socket does not pull its service in, either — a service
+reachable from `default` starts at boot whether anything connects or not, which
+is the opposite of what activation is for.
+
 These are implemented deliberately, and the distinction from unit-file
 compatibility matters:
 
@@ -249,8 +309,9 @@ Units are TOML files. The full key specification is in
 
 A unit is a service, a target, or a socket, determined by which section it
 carries. Targets run no process; they exist to be depended on, so that a
-dependency on one pulls in a set of units. The unit named `default` is what boot
-starts. Socket units arrive in M4.
+dependency on one pulls in a set of units. Socket units run no process either;
+they own listening descriptors and name the service those belong to. The unit
+named `default` is what boot starts.
 
 **Requirement and ordering are orthogonal.** This is the one design idea worth
 taking from systemd unchanged. "A needs B to be running" and "A must start after
@@ -507,6 +568,7 @@ oxinit/
 │  ├─ oxinit-user/       # /etc/passwd and /etc/group
 │  ├─ oxinit-ipc/        # control protocol types
 │  ├─ notify-probe/      # test fixture: a service that speaks sd_notify
+│  ├─ listen-probe/      # test fixture: a socket-activated service
 │  └─ xtask/             # build and boot automation
 ├─ docs/
 └─ tests/

@@ -139,10 +139,12 @@ fn pack_initramfs(binary: &Path, shell: Option<&Path>) -> Result<PathBuf, String
         ),
     }
 
-    // The notify test fixture. Only useful in a test image, and only there
-    // because nothing in busybox can send a unix datagram.
-    if let Ok(probe) = build_package("notify-probe") {
-        install(&probe, &staging.join("bin/notify-probe"))?;
+    // Test fixtures. Only useful in a test image, and only there because
+    // nothing in busybox sends a unix datagram or speaks LISTEN_FDS.
+    for fixture in ["notify-probe", "listen-probe"] {
+        if let Ok(binary) = build_package(fixture) {
+            install(&binary, &staging.join("bin").join(fixture))?;
+        }
     }
 
     install_passwd(&staging)?;

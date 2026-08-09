@@ -24,11 +24,15 @@ one of these must be present:
 |-------------|---------|-----------------------------------------------------|
 | `[service]` | service | Specified below.                                    |
 | `[target]`  | target  | A named group of dependencies. Runs no process.     |
-| `[socket]`  | socket  | Reserved for [M4](../ROADMAP.md). Not yet specified. |
+| `[socket]`  | socket  | Specified below. Listens, and starts a service.     |
 
 Names are unique across kinds: there cannot be both a `sshd` service and a
 `sshd` target. That is what lets `requires`, `after`, and `oxctl` take a bare
 name with no suffix and no ambiguity.
+
+This is why a socket unit names its service explicitly rather than sharing a
+name with it. `sshd-socket` activating `sshd` is two units with two names; the
+alternative would mean `requires = ["sshd"]` no longer identifies one unit.
 
 A unit's **fully-qualified name** is `<name>.<kind>` — `sshd.service`,
 `multi-user.target`. It appears in status output, in cgroup paths, and in the
@@ -113,7 +117,7 @@ They mean different things and neither implies the other. See
 | `[unit]`      | No                          | Identity and dependencies.     |
 | `[service]`   | Exactly one kind section    | How to run the process.        |
 | `[target]`    | Exactly one kind section    | Nothing. Marks the unit a target. |
-| `[socket]`    | Exactly one kind section    | Reserved for M4.               |
+| `[socket]`    | Exactly one kind section    | What to listen on, and what to start. |
 | `[resources]` | No; service units only      | cgroup limits.                 |
 
 An unknown section is a load error, not a warning. So is an unknown key. A
@@ -379,6 +383,141 @@ Once reached, `fork` and `clone` in the cgroup fail with `EAGAIN`.
 Note this key takes a bare integer, not a size string. `tasks-max = 512` is 512
 tasks; `tasks-max = "512"` is a type error.
 
+## `[socket]`
+
+A socket unit is a set of listening descriptors and the name of the service
+they belong to. oxinit creates, binds, and listens on them at boot; the service
+does not start until the first connection arrives.
+
+```toml
+# /etc/oxinit/units/sshd-socket.toml
+
+[unit]
+description = "OpenSSH socket"
+
+[socket]
+listen  = ["0.0.0.0:22", "[::]:22"]
+service = "sshd"
+type    = "stream"          # stream | datagram | seqpacket
+backlog = 128
+```
+
+The descriptors are held by oxinit, not by the service, which is what makes
+this worth doing:
+
+- Units ordered after the socket can rely on the port being **bound**, which is
+  a fact, where "the service started" is a guess.
+- A restart does not refuse connections. The listening socket never closes, so
+  they queue in the kernel and the new process picks them up.
+- The service can be started late, or not at all until something wants it.
+
+A socket unit runs no process and has no cgroup, so `[resources]` on one is a
+load error, exactly as on a target.
+
+### `listen`
+
+- **Type:** array of strings
+- **Required:** **yes**
+- **Default:** none
+
+Addresses to bind. One descriptor is created per entry, in the order written,
+and that is the order the service receives them in.
+
+| Form              | Meaning                                        |
+|-------------------|------------------------------------------------|
+| `1.2.3.4:80`      | IPv4 address and port.                         |
+| `[::1]:80`        | IPv6 address and port, address in brackets.    |
+| `/run/name.sock`  | Unix socket. Must be an absolute path.         |
+
+Addresses are literal. There is no name resolution — PID 1 does not do DNS,
+and a boot that depends on a resolver is a boot that hangs when the resolver
+does. `0.0.0.0` and `[::]` are how you say "every interface".
+
+A bare port is a parse error. `listen = ["22"]` is rejected rather than guessed
+at: write `0.0.0.0:22` or `[::]:22` and say which.
+
+An empty `listen` is a load error. A socket unit that listens on nothing is a
+unit that does nothing.
+
+Unix sockets are unlinked before binding, so a stale file from a previous boot
+is not an error, and are set to mode `0666` afterwards — a socket nobody can
+connect to is not a socket. There is no key to change that yet; when there is,
+it will be `mode`.
+
+### `service`
+
+- **Type:** string
+- **Required:** **yes**
+- **Default:** none
+
+The service unit to start when a connection arrives. It must exist and must be
+a service; anything else is a load error.
+
+Required rather than inferred. A socket cannot share a name with its service
+(see [Unit kinds](#unit-kinds)), and inferring one name from the other would
+put the wiring in a filename convention instead of in the file.
+
+The socket is ordered **before** its service implicitly. If both are started at
+boot, the descriptors are bound before the service runs, or passing them to it
+would mean nothing.
+
+The socket does **not** pull its service in. That is the entire point: a
+service reachable from `default` starts at boot whether anything connects or
+not, and a socket-activated service should normally be reachable only through
+its socket.
+
+### `type`
+
+- **Type:** string, one of `stream`, `datagram`, `seqpacket`
+- **Required:** no
+- **Default:** `stream`
+
+The socket type, applied to every address in `listen`.
+
+| Value       | TCP/Unix equivalent                                  |
+|-------------|------------------------------------------------------|
+| `stream`    | `SOCK_STREAM` — TCP, or a connection-oriented unix socket. |
+| `datagram`  | `SOCK_DGRAM` — UDP, or a unix datagram socket.       |
+| `seqpacket` | `SOCK_SEQPACKET` — unix only.                        |
+
+`datagram` sockets are not listened on; a datagram arriving is what starts the
+service, and the datagram is still queued when it does.
+
+### `backlog`
+
+- **Type:** integer
+- **Required:** no
+- **Default:** `128`
+
+The `listen(2)` backlog. Connections beyond it are refused by the kernel.
+
+Meaningful only for `stream` and `seqpacket`. Setting it alongside
+`type = "datagram"` is a load error rather than a silent no-op, for the same
+reason a typo in `[resources]` is.
+
+## File descriptor passing
+
+A socket-activated service inherits its descriptors and is told about them
+through the environment, using the same protocol systemd defined:
+
+| Variable          | Value                                                     |
+|-------------------|-----------------------------------------------------------|
+| `LISTEN_FDS`      | How many descriptors, starting at fd 3.                   |
+| `LISTEN_PID`      | The pid the descriptors were passed to.                   |
+| `LISTEN_FDNAMES`  | Colon-separated names, one per descriptor.                |
+
+Descriptors arrive at fd 3, 4, 5 … in `listen` order, with `FD_CLOEXEC`
+cleared. `LISTEN_FDNAMES` names each one after the socket unit that created it,
+so a service given descriptors by two socket units can tell them apart.
+
+**A service must check `LISTEN_PID` against its own pid before trusting
+`LISTEN_FDS`.** The variables are inherited by every descendant, and a child
+that read `LISTEN_FDS` without that check would believe it owns descriptors
+that belong to its parent.
+
+This is a runtime protocol, not a configuration format. See the argument in
+[ARCHITECTURE.md](../ARCHITECTURE.md).
+
 ## Value formats
 
 ### Duration strings
@@ -464,6 +603,10 @@ The parser rejects, at load time:
 - Zero or more than one kind section — every unit must have exactly one of
   `[service]`, `[target]`, `[socket]`.
 - A missing `exec` in a service unit.
+- A missing or empty `listen`, or a missing `service`, in a socket unit.
+- A `listen` entry that is neither `address:port` nor an absolute path.
+- A `backlog` on a `datagram` socket.
+- A socket whose `service` does not exist, or is not a service.
 - A `[resources]` section on a unit that is not a service.
 - Two units with the same name but different kinds.
 - A value of the wrong type, including a bare number where a duration or size

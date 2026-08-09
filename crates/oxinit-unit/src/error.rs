@@ -14,17 +14,28 @@ pub enum UnitError {
     },
 
     #[error(
-        "unit `{unit}` has no [service] or [target] section; every unit needs exactly one kind"
+        "unit `{unit}` has no [service], [target], or [socket] section; \
+         every unit needs exactly one kind"
     )]
     NoKind { unit: String },
 
     #[error(
-        "unit `{unit}` has more than one kind section; use exactly one of [service], [target]"
+        "unit `{unit}` has more than one kind section; \
+         use exactly one of [service], [target], [socket]"
     )]
     MultipleKinds { unit: String },
 
-    #[error("unit `{unit}`: [socket] is reserved for milestone 4 and not yet specified")]
-    SocketReserved { unit: String },
+    #[error("unit `{unit}`: listen is empty; a socket that listens on nothing does nothing")]
+    EmptyListen { unit: String },
+
+    #[error(
+        "unit `{unit}`: cannot listen on `{address}`: expected `address:port` \
+         with a literal IP, or an absolute path for a unix socket"
+    )]
+    ListenAddress { unit: String, address: String },
+
+    #[error("unit `{unit}`: backlog has no meaning for type = \"datagram\"")]
+    BacklogOnDatagram { unit: String },
 
     #[error("unit `{unit}`: watchdog-sec needs type = \"notify\"; nothing else can ping")]
     WatchdogWithoutNotify { unit: String },

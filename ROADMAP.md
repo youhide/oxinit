@@ -165,19 +165,60 @@ to ask for a stop yet.
 
 ## M4 — Socket activation
 
-**Next.**
+**Done.**
 
-- [ ] Socket units: create, bind, and listen before the service starts.
-- [ ] Pass descriptors starting at fd 3, clearing `FD_CLOEXEC`.
-- [ ] Set `LISTEN_FDS`, `LISTEN_PID`, and `LISTEN_FDNAMES` in the child
+- [x] Socket units: create, bind, and listen before the service starts.
+- [x] Pass descriptors starting at fd 3, clearing `FD_CLOEXEC`.
+- [x] Set `LISTEN_FDS`, `LISTEN_PID`, and `LISTEN_FDNAMES` in the child
       environment.
-- [ ] Start the service on the first incoming connection.
-- [ ] Hold the listening socket across a service restart so connections are
+- [x] Start the service on the first incoming connection.
+- [x] Hold the listening socket across a service restart so connections are
       queued rather than refused.
+
+`[socket]` is specified in [docs/UNIT_FORMAT.md](docs/UNIT_FORMAT.md): `listen`,
+`service`, `type`, and `backlog`. A socket unit cannot share a name with its
+service, because unit names are unique across kinds and that is what lets a
+bare name identify one unit; so `service` is required rather than inferred. A
+socket is implicitly ordered before its service and deliberately does not pull
+it in — a service reachable from `default` starts at boot whether anything
+connects or not, which is the opposite of activation.
+
+`LISTEN_PID` is the interesting part. Its value is the pid of the process the
+descriptors went to, and that pid does not exist until after the `fork`, where
+nothing may allocate. So oxinit lays out the child's argv and environment in
+the parent with a fixed-width gap for the digits, the child writes them in, and
+the child execs that image itself from the `pre_exec` hook. `Command`'s own
+environment is no longer used at all, which also means a service sees exactly
+what oxinit set and never a stale `LISTEN_FDS` inherited second-hand.
+
+A listening descriptor stays readable until someone accepts, and oxinit never
+accepts anything, so one left registered after the service starts would spin
+the loop. It is registered exactly while its service is `Inactive` or `Failed`
+— reconciled once per loop iteration rather than armed and disarmed in each of
+the dozen places a service changes state.
+
+Verified under QEMU:
+
+- Two socket units bind before anything starts, one on `/run/echo.sock` and one
+  on `127.0.0.1:7000`, and the service they name does not start at boot.
+- Connecting to the unix socket starts it. It reports `LISTEN_FDS=2`,
+  `LISTEN_FDNAMES=echo-socket:echo-tcp`, and a `LISTEN_PID` equal to its own
+  pid and to the pid oxinit logged. It finds its descriptor by name rather than
+  by assuming fd 3, answers, and exits.
+- A second connection made while the service was still running queues in the
+  backlog, and is served by a fresh activation with a fresh `LISTEN_PID` once
+  the first exits — the socket is watched again, and was never closed.
+
+108 host tests across the five library crates.
+
+Deferred out of M4: a `mode` key for unix sockets. They are chmodded to `0666`
+after binding, because PID 1's umask would otherwise produce a socket only root
+can reach, and restricting that is a choice an operator should make explicitly.
+Nothing needs it yet.
 
 ## M5 — Shutdown and the client
 
-**Not started.**
+**Next.**
 
 - [ ] Ordered shutdown: reverse topological order, `SIGTERM`, timeout,
       `cgroup.kill`.

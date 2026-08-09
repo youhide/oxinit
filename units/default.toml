@@ -16,6 +16,9 @@ wants       = [
     "forking",
     "dropped",
     "stubborn",
+    "echo-socket",
+    "echo-tcp",
+    "poke",
     "absent",
 ]
 after       = ["console", "banner"]

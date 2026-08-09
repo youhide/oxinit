@@ -22,33 +22,46 @@ pub enum Source {
     /// supervisor assigned that cgroup, not a unit name — epoll hands back a
     /// `u64` and nothing else.
     Cgroup(u32),
+    /// A connection arrived on a socket unit's descriptor. Carries the id of
+    /// that descriptor.
+    Socket(u32),
 }
 
-/// Where the per-cgroup tokens start. The fixed sources sit below it, with
-/// room to add more without renumbering anything.
-const CGROUP_TOKEN_BASE: u64 = 16;
+/// epoll carries one `u64` per registration and hands it back unchanged, so
+/// the token has to say both *what kind* of descriptor woke the loop and
+/// *which one*. The high half is the kind, the low half is the id.
+///
+/// A flat numbering with reserved ranges would work too, and would silently
+/// alias the moment one range outgrew its reservation.
+const KIND_SHIFT: u32 = 32;
+const KIND_FIXED: u64 = 0;
+const KIND_CGROUP: u64 = 1;
+const KIND_SOCKET: u64 = 2;
 
 impl Source {
-    /// epoll carries a `u64` per registration and hands it back on wake-up.
-    /// These are those tokens.
     const fn token(self) -> u64 {
-        match self {
-            Source::Signals => 0,
-            Source::Timer => 1,
-            Source::Notify => 2,
-            Source::Cgroup(id) => CGROUP_TOKEN_BASE + id as u64,
-        }
+        let (kind, id) = match self {
+            Source::Signals => (KIND_FIXED, 0),
+            Source::Timer => (KIND_FIXED, 1),
+            Source::Notify => (KIND_FIXED, 2),
+            Source::Cgroup(id) => (KIND_CGROUP, id),
+            Source::Socket(id) => (KIND_SOCKET, id),
+        };
+        (kind << KIND_SHIFT) | id as u64
     }
 
     fn from_token(token: u64) -> Option<Self> {
-        match token {
-            0 => Some(Source::Signals),
-            1 => Some(Source::Timer),
-            2 => Some(Source::Notify),
-            _ => token
-                .checked_sub(CGROUP_TOKEN_BASE)
-                .and_then(|id| u32::try_from(id).ok())
-                .map(Source::Cgroup),
+        let id = token as u32;
+        match token >> KIND_SHIFT {
+            KIND_FIXED => match id {
+                0 => Some(Source::Signals),
+                1 => Some(Source::Timer),
+                2 => Some(Source::Notify),
+                _ => None,
+            },
+            KIND_CGROUP => Some(Source::Cgroup(id)),
+            KIND_SOCKET => Some(Source::Socket(id)),
+            _ => None,
         }
     }
 }
@@ -88,6 +101,17 @@ impl EventLoop {
     /// which is why the read has to go through this same fd.
     pub fn register_pri(&self, fd: impl AsFd, source: Source) -> Result<()> {
         self.add(fd, source, epoll::EventFlags::PRI)
+    }
+
+    /// Stop watching a descriptor without closing it.
+    ///
+    /// This is how a socket unit stops waking the loop once its service is
+    /// running: the pending connection keeps the descriptor readable until the
+    /// service accepts it, and a level-triggered registration would spin on
+    /// that. The descriptor stays open — it is the service's, and holding it
+    /// across a restart is the point.
+    pub fn deregister(&self, fd: impl AsFd) -> Result<()> {
+        epoll::delete(&self.epoll, fd).map_err(Error::Epoll)
     }
 
     fn add(&self, fd: impl AsFd, source: Source, flags: epoll::EventFlags) -> Result<()> {

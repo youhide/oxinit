@@ -275,3 +275,86 @@ fn resolves_from_an_arbitrary_root() {
     let plan = resolve_from(&set, "web").unwrap();
     assert_eq!(plan.order, ["db", "web"]);
 }
+
+/// A socket unit listening on one path and activating `service`.
+fn socket(service: &str, deps: &str) -> String {
+    format!("[socket]\nlisten = [\"/run/x.sock\"]\nservice = \"{service}\"\n[unit]\n{deps}")
+}
+
+#[test]
+fn a_socket_does_not_pull_its_service_in() {
+    let set = units(&[
+        ("default", &target("wants = [\"web-socket\"]")),
+        ("web-socket", &socket("web", "")),
+        ("web", &service("")),
+    ]);
+
+    let plan = resolve(&set).unwrap();
+
+    // The whole point of socket activation: the socket binds at boot, the
+    // service waits for a connection.
+    assert!(plan.order.contains(&"web-socket".to_owned()));
+    assert!(
+        !plan.order.contains(&"web".to_owned()),
+        "a service reachable only through its socket must not start at boot"
+    );
+}
+
+#[test]
+fn a_socket_is_ordered_before_its_service_without_being_asked() {
+    let set = units(&[
+        // Both started at boot, which an operator may well want.
+        ("default", &target("wants = [\"web-socket\", \"web\"]")),
+        ("web-socket", &socket("web", "")),
+        ("web", &service("")),
+    ]);
+
+    let plan = resolve(&set).unwrap();
+
+    assert!(
+        position(&plan.order, "web-socket") < position(&plan.order, "web"),
+        "the descriptors must be bound before the service that inherits them"
+    );
+}
+
+#[test]
+fn a_socket_activating_a_missing_unit_is_fatal() {
+    let set = units(&[
+        ("default", &target("wants = [\"web-socket\"]")),
+        ("web-socket", &socket("web", "")),
+    ]);
+
+    // Unlike a missing `wants`. Binding a port nothing can ever answer is
+    // worse than not binding it.
+    assert!(matches!(
+        resolve(&set),
+        Err(GraphError::MissingSocketService { .. })
+    ));
+}
+
+#[test]
+fn a_socket_cannot_activate_a_target() {
+    let set = units(&[
+        ("default", &target("wants = [\"web-socket\"]")),
+        ("web-socket", &socket("web", "")),
+        ("web", &target("")),
+    ]);
+
+    assert!(matches!(
+        resolve(&set),
+        Err(GraphError::SocketServiceNotAService { .. })
+    ));
+}
+
+#[test]
+fn the_implicit_socket_edge_can_close_a_cycle_and_is_reported() {
+    let set = units(&[
+        ("default", &target("wants = [\"web-socket\", \"web\"]")),
+        ("web-socket", &socket("web", "after = [\"web\"]")),
+        ("web", &service("")),
+    ]);
+
+    // socket -> service implicitly, service -> socket by the `after`. A cycle
+    // is a cycle however one of its edges got there.
+    assert!(matches!(resolve(&set), Err(GraphError::Cycle { .. })));
+}

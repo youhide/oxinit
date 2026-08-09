@@ -1,0 +1,12 @@
+# Connects to the echo socket, which is what makes oxinit start `echo`.
+#
+# Ordered after the socket unit: what that guarantees is that the address is
+# *bound*, which is a fact, rather than that some service is ready, which is a
+# guess. Binding early is what makes the ordering worth anything.
+[unit]
+description = "Pokes the echo socket"
+after       = ["echo-socket"]
+
+[service]
+type = "oneshot"
+exec = "/bin/listen-probe --connect /run/echo.sock"
