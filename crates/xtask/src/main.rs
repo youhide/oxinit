@@ -6,6 +6,8 @@
 //! This runs on the developer's machine. The rules that apply to the `oxinit`
 //! crate — no panic, no unsafe, no async — do not apply here.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

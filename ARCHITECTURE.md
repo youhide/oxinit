@@ -27,7 +27,9 @@ PID 1.
 PID 1 cannot exit. If it does, the kernel panics. Everything below follows from
 that.
 
-**No panic.** The `oxinit` crate denies the lints that produce them:
+**No panic.** Every crate that runs inside PID 1 denies the lints that produce
+them — not just the binary, because a panic in the unit parser is a panic in
+PID 1 exactly as much as one in the event loop:
 
 ```rust
 #![deny(
@@ -37,6 +39,10 @@ that.
     clippy::indexing_slicing
 )]
 ```
+
+`oxctl`, `oxlogd` and `xtask` do not carry it. They are separate processes, and
+a panic in one kills that process and nothing else — which is the whole reason
+they are separate.
 
 Errors are values. Fallible operations return `Result`. Error types are defined
 with `thiserror` per crate.
@@ -83,7 +89,17 @@ Some things `rustix` does not cover — `fork` semantics between fork and exec,
 invariant holds at that call site.
 
 A reviewer should be able to audit all unsafe in the project by reading one
-file.
+file — and that is enforced rather than asked for. The `oxinit` crate carries
+`#![deny(unsafe_code)]`, and `sys::raw` is the single module that relaxes it
+with an `#[allow]`; a second `unsafe` block anywhere else in the crate stops
+compiling. Every crate that should contain none at all carries
+`#![forbid(unsafe_code)]`, which cannot be relaxed by anything downstream of
+it.
+
+The two test fixtures, `notify-probe` and `listen-probe`, are the exception:
+they reconstruct inherited descriptors, which is `from_raw_fd` and therefore
+`unsafe`. They are not part of the running system and are installed only in a
+test image.
 
 ## Concurrency
 
@@ -906,7 +922,7 @@ oxinit/
 │  ├─ listen-probe/      # test fixture: a socket-activated service
 │  └─ xtask/             # build and boot automation
 ├─ docs/
-└─ tests/
+└─ units/               # the test image's unit files
 ```
 
 `oxctl` and `oxinit-ipc` arrive in M5. Everything else exists.

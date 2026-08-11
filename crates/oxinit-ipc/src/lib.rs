@@ -15,6 +15,7 @@
 //!
 //! This runs inside PID 1, so a panic here is a panic in PID 1.
 
+#![forbid(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,

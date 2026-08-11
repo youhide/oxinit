@@ -52,6 +52,47 @@ jobs:
       - name: Host tests
         run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer
 
+  msrv:
+    name: builds on the declared MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-version` in Cargo.toml is a promise to anyone on an older
+      # toolchain, and CI otherwise runs whatever `stable` is that week — so
+      # the promise was never checked. A dependency bump or a language feature
+      # raising the real floor would go unnoticed until someone on the
+      # declared minimum tried to build.
+      - name: Install the declared minimum
+        run: |
+          MSRV=$(grep '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "MSRV is $MSRV"
+          rustup toolchain install "$MSRV" --profile minimal
+          rustup target add x86_64-unknown-linux-musl --toolchain "$MSRV"
+          echo "MSRV=$MSRV" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `rustup run` rather than `cargo +TOOLCHAIN`: the latter needs cargo to
+      # be rustup's shim, and it is not on every developer's machine.
+      - run: rustup run "$MSRV" cargo check --workspace --all-targets --target x86_64-unknown-linux-musl
+
+  advisories:
+    name: dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # CLAUDE.md: "The dependency tree of PID 1 is part of its attack
+      # surface." Seven direct dependencies, each justified in the commit that
+      # added it — and nothing was watching them for advisories afterwards.
+      #
+      # Blocking on purpose. An advisory published against something inside
+      # PID 1 is not a warning to look at later.
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
   boot:
     name: boot (${{ matrix.arch }})
     runs-on: ubuntu-latest

@@ -11,7 +11,13 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // ARCHITECTURE.md says a reviewer should be able to audit every `unsafe`
+    // in the project by reading one file. This is what makes that a property
+    // of the build rather than of everyone's discipline: the crate denies
+    // `unsafe`, and exactly one module relaxes it. Adding a second `unsafe`
+    // block anywhere else stops compiling.
+    unsafe_code
 )]
 
 // Without this, building on a non-Linux host fails deep inside the signalfd
