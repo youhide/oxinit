@@ -1,0 +1,9 @@
+# oxinit binds this port at boot and holds it. Nothing runs until something
+# connects — and because the socket is bound before any service starts,
+# a client is never refused while the service comes up.
+[unit]
+description = "Webhook socket"
+
+[socket]
+listen  = ["0.0.0.0:8080"]
+service = "webhook"

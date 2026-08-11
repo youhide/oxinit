@@ -8,6 +8,88 @@ A service manager and PID 1 for Linux, written in Rust.
 
 **Pre-alpha. Nothing is stable.** See [ROADMAP.md](ROADMAP.md) for what works.
 
+## What this is, in one picture
+
+An init system is the first program the kernel starts. It is process number 1,
+and it is responsible for every other process on the machine: starting them in
+the right order, restarting them when they die, and stopping them cleanly when
+the machine goes down. If it exits, the kernel panics and the machine is gone.
+
+```mermaid
+flowchart TD
+    K[Linux kernel] -->|starts as PID 1| O[oxinit]
+    O -->|starts, in order| A[database]
+    O -->|restarts when it dies| B[web server]
+    O -->|starts on a schedule| C[backup job]
+    O -->|starts on a connection| D[rarely-used service]
+    O -.->|stdout and stderr| L[oxlogd → /var/log/oxinit]
+    E[you] -->|oxctl| O
+```
+
+`oxctl` and `oxlogd` are separate programs that talk to oxinit over a socket.
+That is deliberate: a bug in the log writer kills the log writer, and a bug in
+PID 1 kills the machine.
+
+## Try it — one command
+
+You need [Docker](https://docs.docker.com/get-started/get-docker/) and nothing
+else. No Rust, no virtual machine, no kernel.
+
+```bash
+docker run --rm --name oxinit-demo -p 8080:8080 ghcr.io/youhide/oxinit:demo
+```
+
+oxinit boots as PID 1 inside the container and starts a handful of small
+services. You will see it resolve them in order, report each one, and then sit
+there supervising.
+
+The first few lines are oxinit saying what the container runtime will not let
+it do — mount `/run`, set the hostname, write to the cgroup filesystem. That is
+not a failure and not noise: a supervisor that pretended those worked would be
+lying about the machine it is on.
+
+**Look at what it is running.** In a second terminal:
+
+```bash
+docker exec oxinit-demo /bin/oxctl list
+```
+
+**Read a service's log.** `counter` writes a line every two seconds, into its
+own file rather than onto the console:
+
+```bash
+docker exec oxinit-demo /bin/oxctl logs counter
+```
+
+**Watch a service start because you asked for something.** Nothing is
+listening on port 8080 — no process, that is, though the port is bound. The
+request is what starts the service:
+
+```bash
+curl localhost:8080
+```
+
+**Stop it the way a real system would.** `docker stop` sends `SIGTERM`, which
+is a request to shut down, not a kill:
+
+```bash
+docker stop oxinit-demo
+```
+
+oxinit stops every service in the reverse of the order it started them, waits
+for each to actually be gone, and exits `0`. Most container images have to be
+killed after a ten-second grace period; that shows up as exit code 137.
+
+The units the demo runs are in [demo/](demo/), one small file each, and they
+are meant to be read.
+
+To build and run it yourself instead of pulling the published image:
+
+```bash
+cargo xtask fetch --arch x86_64   # a kernel and a busybox, into target/
+cargo xtask demo                  # build the image and run it
+```
+
 ## Why
 
 Every init system in production use is written in C: systemd, OpenRC, runit,
@@ -114,6 +196,40 @@ armed absolutely on a `CLOCK_REALTIME` timerfd, so "at 03:30" survives the
 clock being corrected under it. A firing that arrives
 while the service is still running is skipped rather than queued, and a failed
 run does not stop the schedule.
+
+## What oxinit does with a service
+
+Every service moves through the same states, and the edges are what the
+`restart` policy and the readiness `type` decide between.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Inactive
+    Inactive --> Activating: start requested,<br/>and everything it is `after` has finished
+    Activating --> Active: ready — depends on `type`
+    Activating --> Failed: exec failed, or `start-sec` expired
+    Activating --> Inactive: a `oneshot` exited 0
+    Active --> Deactivating: stop requested, or a watchdog miss
+    Active --> Failed: exited nonzero, or on a signal
+    Deactivating --> Inactive: its cgroup emptied in time
+    Deactivating --> Failed: `stop-sec` expired, killed by cgroup
+    Failed --> Restarting: the `restart` policy applies
+    Inactive --> Restarting: the `restart` policy applies
+    Restarting --> Activating: the backoff elapsed
+```
+
+"Ready" is the interesting one, and it is what `type` selects:
+
+| `type`    | Becomes `Active` when                                          |
+|-----------|-----------------------------------------------------------------|
+| `simple`  | `exec` succeeded. No more accurate than that.                    |
+| `oneshot` | The process exited with status 0 — and it goes `Inactive`, not `Active`. |
+| `notify`  | The service sent `READY=1` on the notify socket.                 |
+| `forking` | The initial process exited and the cgroup still has something in it. |
+
+Backoff doubles per consecutive failure and resets once the service has stayed
+up longer than its own current delay — without that, a service that crashes
+once a day eventually takes hours to come back.
 
 ## oxctl
 
@@ -226,12 +342,13 @@ container's PID 1.
 | **M13** | Coverage for seven behaviours the milestones claimed and nothing re-ran. |
 | **M14** | Calendar schedules on the wall clock; datagram sockets; the list closed. |
 | **M15** | The documents' invariants enforced by the build, not by discipline. |
+| **M16** | A demo, a released binary, and a README that starts at the beginning. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M15. [ROADMAP.md](ROADMAP.md) has the breakdown —
+Nothing is scheduled after M16. [ROADMAP.md](ROADMAP.md) has the breakdown —
 what each milestone was verified against, what was deferred out of it, and
 which remaining ideas are deliberately not being taken.
 
@@ -254,7 +371,8 @@ This builds a static binary for `x86_64-unknown-linux-musl`, packs it into a
 single-file cpio initramfs, and boots it:
 
 ```bash
-qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "console=ttyS0"
+qemu-system-x86_64 -kernel target/vmlinuz-x86_64 \
+  -initrd target/oxinit-x86_64.cpio.gz -nographic -append "console=ttyS0"
 ```
 
 Edit to boot takes a few seconds. `Ctrl-A X` exits QEMU. Setup details are in

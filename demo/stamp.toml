@@ -1,0 +1,8 @@
+# Started only by the timer. Nothing wants this unit, so boot never starts it —
+# which is the point of a schedule.
+[unit]
+description = "Started by the clock"
+
+[service]
+type = "oneshot"
+exec = "/bin/date -u"

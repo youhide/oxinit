@@ -1,0 +1,14 @@
+# A long-running service whose output goes to a file instead of the console.
+#
+# Read it with `oxctl logs counter`. Each line is timestamped by oxlogd, and
+# the file is rotated by size so a chatty service cannot fill the disk.
+[unit]
+description = "Counts, into its own log"
+after       = ["logs"]
+requires    = ["logs"]
+
+[service]
+exec     = '/bin/sh -c "n=1; while /bin/true; do /bin/echo \"tick $n\"; n=$((n+1)); /bin/sleep 2; done"'
+output   = "log"
+restart  = "on-failure"
+stop-sec = "2s"

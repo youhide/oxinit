@@ -7,6 +7,7 @@
 //! Usage:
 //!
 //! ```text
+//! listen-probe --http NAME      # the activated service, answering HTTP
 //! listen-probe --serve NAME     # the activated service, over a stream
 //! listen-probe --recv NAME      # the activated service, over a datagram
 //! listen-probe --connect PATH   # the client that triggers a stream
@@ -25,6 +26,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
+use std::net::TcpListener;
 use std::os::fd::FromRawFd as _;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::process::ExitCode;
@@ -35,7 +37,9 @@ const FIRST_LISTEN_FD: i32 = 3;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    let result = if let Some(name) = flag(&args, "--serve") {
+    let result = if let Some(name) = flag(&args, "--http") {
+        http(name)
+    } else if let Some(name) = flag(&args, "--serve") {
         serve(name)
     } else if let Some(name) = flag(&args, "--recv") {
         recv(name)
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
     } else if let Some(path) = flag(&args, "--send") {
         send(path)
     } else {
-        Err("usage: listen-probe --serve|--recv NAME | --connect|--send PATH".to_owned())
+        Err("usage: listen-probe --http|--serve|--recv NAME | --connect|--send PATH".to_owned())
     };
 
     match result {
@@ -120,6 +124,47 @@ fn inherited(name: &str) -> Result<i32, String> {
     );
 
     Ok(index)
+}
+
+/// Answer one HTTP request and exit.
+///
+/// Not a web server. It exists so that the demo image can be poked with
+/// `curl`, which is the shortest path from "what is socket activation" to
+/// seeing it happen: nothing is running, the request arrives, oxinit starts
+/// this, and the reply comes back on a connection that was never refused.
+fn http(name: &str) -> Result<(), String> {
+    let index = inherited(name)?;
+
+    // SAFETY: the descriptor was inherited from oxinit at this number, nothing
+    // else in this process owns it, and the protocol says it is a listening
+    // socket. A test fixture, not PID 1.
+    let listener = unsafe { TcpListener::from_raw_fd(FIRST_LISTEN_FD + index) };
+
+    let (mut stream, from) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+    println!("listen-probe: connection from {from}");
+
+    // Read and discard the request line. Answering without reading would have
+    // the client see a reset before it finished writing.
+    let mut request = [0u8; 1024];
+    let _ = stream.read(&mut request);
+
+    const BODY: &str = "oxinit started this service because you connected.\n\
+                        It was not running a moment ago.\n";
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n{BODY}",
+        BODY.len()
+    );
+
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+
+    Ok(())
 }
 
 /// The datagram half of `serve`.

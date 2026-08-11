@@ -99,6 +99,8 @@ fn main() {
             .map(|path| println!("{}", path.display())),
         "test-boot" => test_boot_all(&rest),
         "container" => container(&rest),
+        "demo" => demo(&rest),
+        "test-demo" => test_demo(&rest),
         "test-distro" => test_distro(&rest),
         "fetch" => fetch(&rest),
         "" | "help" | "--help" | "-h" => {
@@ -123,6 +125,8 @@ commands:
   boot       build, pack an initramfs, and boot it under QEMU
   test-boot  boot with a timeout and assert on the serial log
   container  build a container image, run it, and assert on its output
+  demo       build the demo image and run it, the way the README says to
+  test-demo  build the demo image and check every claim the README makes
   test-distro
              boot a real distribution userspace and assert on the serial log
   fetch      download the kernel and busybox a boot needs, into target/
@@ -889,6 +893,150 @@ const BOOT_TIMEOUT: u32 = 30;
 /// 137 no matter how long the wait was.
 const STOP_GRACE: u32 = 30;
 
+/// The image the README tells a newcomer to run.
+///
+/// Same build path as `container`, from `demo/` instead of `units/`, and it
+/// runs in the foreground so that what a reader sees here is exactly what the
+/// README says they will see.
+fn demo(args: &[String]) -> Result<(), String> {
+    let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
+    let arch = find_arch(args)?;
+    let tag = flag(args, "--tag")?.unwrap_or(DEMO_IMAGE).to_owned();
+
+    let shell = find_shell(arch, args)?;
+    if shell.is_none() {
+        return Err(format!(
+            "the demo needs a shell in the image. Run `cargo xtask fetch --arch {}` first.",
+            arch.name
+        ));
+    }
+
+    let binary = build(arch)?;
+    let staging = stage_units(arch, &binary, shell.as_deref(), false, "demo")?;
+    let dockerfile = write_dockerfile()?;
+
+    println!("xtask: building {tag}");
+    run(Command::new(&engine).args([
+        "build".as_ref(),
+        "-q".as_ref(),
+        "-t".as_ref(),
+        tag.as_ref(),
+        "-f".as_ref(),
+        dockerfile.as_os_str(),
+        staging.as_os_str(),
+    ]))?;
+
+    if args.iter().any(|arg| arg == "--build-only") {
+        println!("xtask: built {tag}");
+        return Ok(());
+    }
+
+    remove_named(&engine, DEMO_NAME);
+
+    println!("xtask: running it. Ctrl-C, or `{engine} stop {DEMO_NAME}`, ends it.\n");
+    run(Command::new(&engine).args(["run", "--rm", "--name", DEMO_NAME, "-p", "8080:8080", &tag]))
+}
+
+/// Every command the README's opening section tells a newcomer to run, and
+/// what each one has to produce.
+///
+/// The demo is the first thing anybody sees, so it is the worst thing to let
+/// rot — and this project has already learned once, in M13, that an artifact
+/// nothing runs stops being true quietly. A README that tells someone to type
+/// something that no longer works is worse than a README with nothing in it.
+fn test_demo(args: &[String]) -> Result<(), String> {
+    let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
+    let mut build = args.to_vec();
+    build.push("--build-only".to_owned());
+    demo(&build)?;
+
+    remove_named(&engine, DEMO_NAME);
+    run(Command::new(&engine)
+        .args([
+            "run",
+            "-d",
+            "--name",
+            DEMO_NAME,
+            "-p",
+            "8080:8080",
+            DEMO_IMAGE,
+        ])
+        .stdout(Stdio::null()))?;
+
+    let result = drive_demo(&engine);
+    remove_named(&engine, DEMO_NAME);
+    result
+}
+
+fn drive_demo(engine: &str) -> Result<(), String> {
+    let mut failures = Vec::new();
+
+    println!("xtask: waiting for the demo to finish booting");
+    if !wait_for_line_in(engine, DEMO_NAME, "oxinit: reached target default", 30)? {
+        return Err("the demo never reached its default target".to_owned());
+    }
+
+    // `docker exec oxinit-demo /bin/oxctl list`
+    let list = exec_in(engine, DEMO_NAME, &["/bin/oxctl", "list"])?;
+    for unit in ["clock", "counter", "logs", "webhook-socket"] {
+        if !list.contains(unit) {
+            failures.push(format!("`oxctl list` does not mention `{unit}`"));
+        }
+    }
+
+    // `docker exec oxinit-demo /bin/oxctl logs counter`
+    let logs = exec_in(engine, DEMO_NAME, &["/bin/oxctl", "logs", "counter"])?;
+    if !logs.contains("tick ") {
+        failures.push("`oxctl logs counter` shows no ticks".to_owned());
+    }
+
+    // `curl localhost:8080` — the socket-activated service, which was not
+    // running until this line.
+    let before = exec_in(engine, DEMO_NAME, &["/bin/oxctl", "status", "webhook"])?;
+    if !before.contains("inactive") {
+        failures.push("`webhook` was already running before anything connected".to_owned());
+    }
+
+    let answer = capture("curl", &["-s", "--max-time", "10", "http://localhost:8080"])?;
+    if !answer.contains("oxinit started this service because you connected") {
+        failures.push(format!("curl localhost:8080 said {answer:?}"));
+    }
+
+    // `docker stop` — the whole point, and the thing most images fail.
+    println!("xtask: stopping it the way the README says to");
+    let started = std::time::Instant::now();
+    run(Command::new(engine)
+        .args(["stop", "-t", "30", DEMO_NAME])
+        .stdout(Stdio::null()))?;
+    let took = started.elapsed();
+
+    let status = inspect_named(engine, DEMO_NAME, "{{.State.ExitCode}}")?;
+    println!(
+        "xtask: stopped in {:.1}s, exit code {status}",
+        took.as_secs_f32()
+    );
+    if status != "0" {
+        failures.push(format!(
+            "exit code {status}, not 0 — the README promises a clean stop"
+        ));
+    }
+
+    if failures.is_empty() {
+        println!("xtask: every command the README gives a newcomer works");
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} README claim(s) failed:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    ))
+}
+
+/// The published demo image, and the container it runs as.
+const DEMO_IMAGE: &str = "oxinit:demo";
+const DEMO_NAME: &str = "oxinit-demo";
+
 /// `test-boot` for a runtime that is not QEMU.
 ///
 /// Builds the same root filesystem the initramfs is packed from, as a
@@ -907,7 +1055,7 @@ fn container(args: &[String]) -> Result<(), String> {
     // `false`, unlike `test-boot`: no unit that ends the test by signalling
     // PID 1, because what ends this one is the runtime's stop — which is the
     // thing being tested.
-    let staging = stage(arch, &binary, shell.as_deref(), false)?;
+    let staging = stage_units(arch, &binary, shell.as_deref(), false, "units")?;
     let dockerfile = write_dockerfile()?;
 
     println!("xtask: building {CONTAINER_IMAGE} with {engine}");
@@ -1042,8 +1190,12 @@ fn survives_a_shipper_restart(engine: &str) -> Result<Vec<String>, String> {
 
 /// Run something inside the container and return its standard output.
 fn exec(engine: &str, argv: &[&str]) -> Result<String, String> {
+    exec_in(engine, CONTAINER_NAME, argv)
+}
+
+fn exec_in(engine: &str, name: &str, argv: &[&str]) -> Result<String, String> {
     let mut command = Command::new(engine);
-    command.args(["exec", CONTAINER_NAME]).args(argv);
+    command.args(["exec", name]).args(argv);
 
     let out = command
         .output()
@@ -1062,8 +1214,12 @@ fn exec(engine: &str, argv: &[&str]) -> Result<String, String> {
 
 /// Poll the log until `needle` shows up. `false` on timeout.
 fn wait_for_line(engine: &str, needle: &str, seconds: u32) -> Result<bool, String> {
+    wait_for_line_in(engine, CONTAINER_NAME, needle, seconds)
+}
+
+fn wait_for_line_in(engine: &str, name: &str, needle: &str, seconds: u32) -> Result<bool, String> {
     for _ in 0..seconds * 5 {
-        if logs(engine)?.contains(needle) {
+        if logs_of(engine, name)?.contains(needle) {
             return Ok(true);
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1077,8 +1233,12 @@ fn wait_for_line(engine: &str, needle: &str, seconds: u32) -> Result<bool, Strin
 /// assertions do not care which — so they are concatenated rather than kept
 /// apart.
 fn logs(engine: &str) -> Result<String, String> {
+    logs_of(engine, CONTAINER_NAME)
+}
+
+fn logs_of(engine: &str, name: &str) -> Result<String, String> {
     let out = Command::new(engine)
-        .args(["logs", CONTAINER_NAME])
+        .args(["logs", name])
         .output()
         .map_err(|e| format!("run {engine} logs: {e}"))?;
 
@@ -1086,8 +1246,12 @@ fn logs(engine: &str) -> Result<String, String> {
 }
 
 fn inspect(engine: &str, format: &str) -> Result<String, String> {
+    inspect_named(engine, CONTAINER_NAME, format)
+}
+
+fn inspect_named(engine: &str, name: &str, format: &str) -> Result<String, String> {
     let out = Command::new(engine)
-        .args(["inspect", "-f", format, CONTAINER_NAME])
+        .args(["inspect", "-f", format, name])
         .output()
         .map_err(|e| format!("run {engine} inspect: {e}"))?;
 
@@ -1096,8 +1260,12 @@ fn inspect(engine: &str, format: &str) -> Result<String, String> {
 
 /// Best-effort, and called on every path out of a run.
 fn remove(engine: &str) {
+    remove_named(engine, CONTAINER_NAME);
+}
+
+fn remove_named(engine: &str, name: &str) {
     let _ = Command::new(engine)
-        .args(["rm", "-f", CONTAINER_NAME])
+        .args(["rm", "-f", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1165,7 +1333,23 @@ fn pack_initramfs(
 /// `/bin/sh`. Without it the boot still proves the mount, console, signalfd,
 /// and reap paths, which is most of M0.
 fn stage(arch: Arch, binary: &Path, shell: Option<&Path>, test: bool) -> Result<PathBuf, String> {
-    let staging = root().join(format!("target/initramfs-{}", arch.name));
+    stage_units(arch, binary, shell, test, "units")
+}
+
+/// As [`stage`], but from a named unit directory.
+///
+/// `units/` is the test suite: it holds services that fail on purpose, hang on
+/// purpose and refuse to stop, because that is what a test image is for.
+/// `demo/` is the small clean set the published image runs — none of that
+/// belongs in the first thing somebody sees.
+fn stage_units(
+    arch: Arch,
+    binary: &Path,
+    shell: Option<&Path>,
+    test: bool,
+    units: &str,
+) -> Result<PathBuf, String> {
+    let staging = root().join(format!("target/initramfs-{}-{units}", arch.name));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("create {}: {e}", staging.display()))?;
 
@@ -1210,7 +1394,7 @@ fn stage(arch: Arch, binary: &Path, shell: Option<&Path>, test: bool) -> Result<
 
     // Units, if any. `/etc` rather than `/usr/lib`, since a hand-assembled
     // test image is the operator's, not a package's.
-    let units_src = root().join("units");
+    let units_src = root().join(units);
     if units_src.is_dir() {
         let units_dst = staging.join("etc/oxinit/units");
         fs::create_dir_all(&units_dst)
@@ -1229,7 +1413,7 @@ fn stage(arch: Arch, binary: &Path, shell: Option<&Path>, test: bool) -> Result<
                 }
             }
         }
-        println!("xtask: installed {count} units from units/");
+        println!("xtask: installed {count} units from {units}/");
 
         if test {
             install_test_shutdown(&units_dst)?;

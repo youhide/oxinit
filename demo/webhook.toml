@@ -1,0 +1,11 @@
+# Started by a connection, not by boot. oxinit hands it the already-bound
+# listening socket as file descriptor 3, and tells it so through LISTEN_FDS.
+#
+# Try it from your own machine: curl localhost:8080
+[unit]
+description = "Socket-activated service"
+
+[service]
+type    = "oneshot"
+exec    = "/bin/listen-probe --http webhook-socket"
+restart = "no"

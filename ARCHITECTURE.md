@@ -963,7 +963,8 @@ tested without a kernel should not be in it.
 3. Boots it:
 
 ```bash
-qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "console=ttyS0"
+qemu-system-x86_64 -kernel target/vmlinuz-x86_64 \
+  -initrd target/oxinit-x86_64.cpio.gz -nographic -append "console=ttyS0"
 ```
 
 Edit to boot is a few seconds. `-nographic` puts the guest's serial console on

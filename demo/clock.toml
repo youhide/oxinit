@@ -1,0 +1,13 @@
+# A timer. Starts `stamp` five seconds in, then every fifteen seconds after
+# that — measured from the previous firing, not from a clock.
+#
+# `on-calendar = "hourly"` would put it on the wall clock instead, so a
+# correction to the system time moves it to the right hour rather than by the
+# size of the correction.
+[unit]
+description = "Runs the stamp job on a schedule"
+
+[timer]
+service  = "stamp"
+on-boot  = "5s"
+interval = "15s"

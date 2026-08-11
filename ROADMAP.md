@@ -894,6 +894,49 @@ CLAUDE.md and ARCHITECTURE.md and had never existed. The integration tests are
 the `xtask` suites, and the directory that does exist and was not listed is
 `units/`.
 
+## M16 — A way in
+
+**Done.**
+
+Everything above is written for someone implementing an init system. Nothing
+was written for someone deciding whether to look at one, and the shortest path
+to running it required a Rust toolchain, a musl target, QEMU, `cpio` and a
+kernel you had to go and find.
+
+- [x] `demo/`: eight units that show what oxinit does, none of which fail on
+      purpose.
+- [x] `cargo xtask demo`, and a published image, so the first command needs
+      Docker and nothing else.
+- [x] A README opening that explains what an init system *is* before saying
+      why this one exists, with diagrams.
+- [x] `cargo xtask test-demo`, in CI, so the README cannot quietly stop being
+      true.
+- [x] A release workflow: static binaries for both architectures, checksums,
+      generated notes, and the demo image on ghcr.io.
+
+**The unit set was the problem.** `units/` is the test suite. It contains a
+service that fails forever, one that hangs, one that ignores `SIGTERM`, one
+that requires something broken, and one that never signals readiness — all
+deliberate, all necessary, and all of it reads as a crash to somebody seeing
+oxinit for the first time. `demo/` is eight files that work, each one showing
+exactly one idea: ordering, readiness, logs, a schedule, socket activation.
+
+**The demo is tested, and that is the point.** M13 found seven behaviours that
+had been verified once and never again, and the worst of them had a unit file
+whose comment described a test nothing ran. The README's opening is the same
+hazard with a wider blast radius: `test-demo` runs every command it tells a
+newcomer to type — `oxctl list`, `oxctl logs counter`, `curl localhost:8080`,
+`docker stop` — and checks that `webhook` is *not* running before the request
+that starts it.
+
+**No tag is cut here.** The workflow fires on a pushed tag and nothing else. A
+version number is a claim about stability, and the person making that claim
+should be the one typing it.
+
+Verified: the demo boots, `curl localhost:8080` returns from a service that
+was inactive a moment earlier, `oxctl logs counter` shows timestamped ticks,
+and `docker stop` exits 0 in under a second.
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than
