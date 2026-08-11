@@ -963,6 +963,39 @@ twelve seconds later — and the test image asks for a shutdown sixteen seconds
 in, inside that window with margin on both sides. Reproducing it by luck once
 is not a regression test.
 
+### The first command in the README did not work
+
+Reported by the first person to try it, which is the whole point of writing a
+section for people who have not seen the project before — and an unambiguous
+failure of the milestone that added it.
+
+The README told a newcomer to `docker run ghcr.io/…/oxinit:demo`. No tag had
+been pushed, so the release workflow that published that image had never run,
+and the image did not exist. `test-demo` passed the entire time: it builds the
+image locally and checks *that*, so the test and the README were talking about
+two different images and nothing compared them.
+
+Three fixes, and only one of them is the obvious one.
+
+The demo image is **documentation, not a release artifact**, so it is published
+from `main` by CI rather than from a tag by the release workflow. Tying it to a
+release meant the README pointed at something that would not exist until a
+version number had been declared — a separate decision, and not one anybody was
+about to make. The release workflow now adds a versioned tag and nothing else.
+
+The README leads with the two commands that work with no registry at all, and
+offers the pull second.
+
+And CI checks that the image reference in the README is the one the publish
+step pushes. That is the half a test on a locally built image structurally
+cannot cover, and it is the half that failed.
+
+One thing here is not automatable: a package pushed by Actions is **private by
+default**, and an anonymous `docker run` against a private package fails with
+exactly the `denied` that was reported. Making it public is a one-time setting
+on the repository's package page, and it belongs to whoever owns the account
+rather than to CI.
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than
