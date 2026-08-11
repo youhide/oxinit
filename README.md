@@ -32,18 +32,18 @@ PID 1 kills the machine.
 
 ## Try it
 
-You need [Docker](https://docs.docker.com/get-started/get-docker/) and a Rust
-toolchain. Two commands:
+You need [Docker](https://docs.docker.com/get-started/get-docker/) and nothing
+else. No Rust, no virtual machine, no kernel.
+
+```bash
+docker run --rm --name oxinit-demo -p 8080:8080 ghcr.io/youhide/oxinit:demo
+```
+
+The image tracks `main` and is 4.6 MB. To build and run it yourself instead:
 
 ```bash
 cargo xtask fetch --arch x86_64   # a kernel and a busybox, into target/
 cargo xtask demo                  # build the image and run it
-```
-
-Or pull the image, which tracks `main` and needs no toolchain at all:
-
-```bash
-docker run --rm --name oxinit-demo -p 8080:8080 ghcr.io/youhide/oxinit:demo
 ```
 
 oxinit boots as PID 1 inside the container and starts a handful of small
@@ -88,8 +88,9 @@ for each to actually be gone, and exits `0`. Most container images have to be
 killed after a ten-second grace period; that shows up as exit code 137.
 
 The units the demo runs are in [demo/](demo/), one small file each, and they
-are meant to be read. The image is 4.6 MB — statically linked against musl,
-`FROM scratch`, no base image and no shared libraries.
+are meant to be read. The image is that small because oxinit is statically
+linked against musl and the image is `FROM scratch` — no base image, no shared
+libraries, nothing in it but the three binaries and the units.
 
 ## Why
 
