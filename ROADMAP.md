@@ -937,6 +937,32 @@ Verified: the demo boots, `curl localhost:8080` returns from a service that
 was inactive a moment earlier, `oxctl logs counter` shows timestamped ticks,
 and `docker stop` exits 0 in under a second.
 
+**And CI found a bug in PID 1 while this was in review.** The distribution
+suite failed one assertion — not on anything M16 touched, and it had passed on
+`main`. It reproduced as a hang, not as the missing line it reported.
+
+A unit whose stop *completes* during a shutdown took its restart policy and
+went to `Restarting`. `settled` waits for every unit that is not `Inactive` or
+`Failed`, and nothing ever starts one again on the way down, so the machine sat
+there until the ninety-second whole-shutdown deadline and then went down
+anyway. `stop` had always cancelled a *pending* backoff for exactly this reason
+— the comment saying so is still there — and the hole was the stop that
+finishes afterwards.
+
+Two things came out of it. The clock that ends a test image is now anchored to
+the default target rather than to the start of boot: counting from boot made
+the budget the sum of how long the machine takes to come up, which varies with
+the image and the host, and how long the assertions need, which does not. M11
+made boot wait for each unit to finish activating rather than merely to be
+issued, and M13 and M14 added units to wait for; the number had not moved since
+M5, and it went over on the slowest image on a loaded runner.
+
+And the bug got a unit of its own. `lingers` misses its watchdog thirteen
+seconds after the target and ignores `SIGTERM`, so only `cgroup.kill` ends it
+twelve seconds later — and the test image asks for a shutdown sixteen seconds
+in, inside that window with margin on both sides. Reproducing it by luck once
+is not a regression test.
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than

@@ -340,6 +340,11 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("reloaded", "M5: oxctl reload, which no boot had ever run"),
     (
+        "lingers stopped; not restarting, the machine is going down",
+        "M16: a stop that completes mid-shutdown does not take the restart \
+         policy, which used to hang PID 1 until the whole-shutdown deadline",
+    ),
+    (
         "oxinit: shutting down to power off",
         "M5: SIGTERM is handled",
     ),
@@ -1442,11 +1447,22 @@ fn is_busybox(path: &Path) -> bool {
         .is_some_and(|name| name.contains("busybox"))
 }
 
-/// How long the test image runs before asking oxinit to shut down.
+/// How long the test image runs *after boot finishes* before asking oxinit to
+/// shut down.
 ///
-/// Long enough for the slowest thing being asserted on — the watchdog miss at
-/// three seconds, its stop timeout, and the escalation to `cgroup.kill` after
-/// that.
+/// Long enough for the slowest thing being asserted on: the watchdog miss at
+/// three seconds, its stop timeout, the escalation to `cgroup.kill` after
+/// that, and a timer that has to fire more than once.
+///
+/// Measured from the default target rather than from the start of boot, and
+/// that distinction is the whole of it. Counting from boot made the budget the
+/// sum of two unrelated things — how long the machine takes to come up, which
+/// varies with the image and the host, and how long the assertions need, which
+/// does not. M11 then made boot wait for each unit to finish activating rather
+/// than merely to be issued, and M13 and M14 added units to wait for; the
+/// number here had not moved since M5. It went over on a loaded CI runner
+/// against the distribution image, where the boot is slowest, and the unit
+/// whose assertion lost the race was the last one in the queue.
 const TEST_UPTIME: u32 = 16;
 
 /// The unit that makes `test-boot` end.
@@ -1454,10 +1470,15 @@ const TEST_UPTIME: u32 = 16;
 /// Only ever written into a test image. `cargo xtask boot` gives you a machine
 /// that stays up, which is the whole point of it.
 fn install_test_shutdown(units: &Path) -> Result<(), String> {
+    // `after = ["default"]` is what anchors the clock to the end of boot. The
+    // target is reached when everything ordered before it has finished
+    // activating, so the sleep below covers only what the assertions need and
+    // none of what the image takes to come up.
     let unit = format!(
         "# Written by `cargo xtask test-boot`. Not in units/.\n\
          [unit]\n\
-         description = \"End the test\"\n\n\
+         description = \"End the test\"\n\
+         after       = [\"default\"]\n\n\
          [service]\n\
          exec = '/bin/sh -c \"/bin/sleep {TEST_UPTIME}; /bin/kill -TERM 1\"'\n"
     );
