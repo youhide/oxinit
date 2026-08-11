@@ -7,6 +7,8 @@
 //! Not PID 1. This process may panic, may exit, and is held to none of the
 //! rules the `oxinit` crate carries.
 
+#![forbid(unsafe_code)]
+
 use std::path::Path;
 use std::process::ExitCode;
 

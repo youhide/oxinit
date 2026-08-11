@@ -225,15 +225,21 @@ container's PID 1.
 | **M12** | CI: every suite above, on every push. |
 | **M13** | Coverage for seven behaviours the milestones claimed and nothing re-ran. |
 | **M14** | Calendar schedules on the wall clock; datagram sockets; the list closed. |
+| **M15** | The documents' invariants enforced by the build, not by discipline. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M14, and [ROADMAP.md](ROADMAP.md) says which two
-remaining ideas are deliberately not being taken and why. [ROADMAP.md](ROADMAP.md) has the breakdown,
-including what each milestone was verified against and what was deferred out
-of it.
+Nothing is scheduled after M15. [ROADMAP.md](ROADMAP.md) has the breakdown —
+what each milestone was verified against, what was deferred out of it, and
+which remaining ideas are deliberately not being taken.
+
+Every `unsafe` block in the project lives in one file, and that is a property
+of the build rather than of anyone's discipline: `oxinit` denies `unsafe_code`
+with a single module relaxing it, and every crate that should contain none
+carries `forbid`. CI also builds on the declared MSRV and checks the dependency
+tree for advisories, because both were promises nothing was keeping.
 
 ## Running it
 

@@ -848,6 +848,52 @@ do. A fixture for it would test the fixture.
 Verified: 41 checks per architecture, 43 against the distribution image, 148
 host tests.
 
+## M15 — Enforcing what the documents assert
+
+**Done.**
+
+The pattern that produced M6, M11, M13 and M14 was reading a document and
+checking the code against it. This is the same pass applied to the *invariants*
+rather than the behaviours — the things the documents state as properties of
+the project, which nothing was checking.
+
+- [x] `#![forbid(unsafe_code)]` on every crate that should contain none, and
+      `#![deny(unsafe_code)]` on `oxinit` with exactly one module relaxing it.
+- [x] A CI job that builds on the declared MSRV.
+- [x] A CI job that checks the dependency tree for advisories.
+- [x] `tests/`, listed in two documents and never created.
+
+**"A reviewer should be able to audit all unsafe in the project by reading one
+file."** ARCHITECTURE has said that since before there was code. It was true,
+and it was true by everyone's discipline: nothing stopped a second `unsafe`
+block appearing in the supervisor or in the unit parser. Now the crate denies
+`unsafe_code` and `sys::raw` is the single `#[allow]`, so a second one stops
+compiling. Checked by adding one to `reap.rs` and watching the build fail, and
+again in `oxinit-unit`, which cannot even be relaxed — `forbid` is not
+overridable downstream.
+
+The two test fixtures keep theirs. Reconstructing an inherited descriptor is
+`from_raw_fd`, which is `unsafe` by construction, and they are installed only
+in a test image.
+
+**The MSRV was a promise to strangers and nothing kept it.** `rust-version =
+"1.95"` is a claim about people on older toolchains, and CI ran whatever
+`stable` was that week — so a dependency bump raising the real floor would have
+been discovered by whoever it broke. It builds on 1.95 today; from now on that
+is a fact the build reports rather than an assumption.
+
+**"The dependency tree of PID 1 is part of its attack surface"** is in
+CLAUDE.md, and every dependency's commit message justifies it. Nothing watched
+them afterwards. `cargo audit` runs on every push, blocking — an advisory
+against something inside PID 1 is not a warning to look at later. Thirty-five
+crates in the lockfile, no advisories today.
+
+Nothing was broken here either. Like M13, this bought enforcement rather than
+repair — with one exception: `tests/` appeared in the workspace layout in both
+CLAUDE.md and ARCHITECTURE.md and had never existed. The integration tests are
+the `xtask` suites, and the directory that does exist and was not listed is
+`units/`.
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than

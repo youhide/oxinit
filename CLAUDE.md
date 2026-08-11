@@ -21,7 +21,7 @@ crates/oxinit-cgroup/  cgroup v2
 crates/oxinit-ipc/     control protocol types
 crates/xtask/          build and boot automation
 docs/                  specifications
-tests/                 integration tests
+units/                 the test image's unit files
 ```
 
 `oxinit-unit`, `oxinit-graph`, and `oxinit-service` must stay free of

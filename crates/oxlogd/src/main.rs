@@ -20,6 +20,8 @@
 //! dropped. `epoll` pays for a registration call per change to make waiting
 //! cheap on a large stable set, and there is neither here.
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{IoSliceMut, Write as _};
