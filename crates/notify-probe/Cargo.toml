@@ -1,6 +1,6 @@
 [package]
 name = "notify-probe"
-version = "0.0.0"
+version.workspace = true
 description = "Test fixture: a service that speaks sd_notify"
 edition.workspace = true
 rust-version.workspace = true

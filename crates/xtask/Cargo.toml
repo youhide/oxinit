@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-version = "0.0.0"
+version.workspace = true
 description = "Build and boot automation"
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "oxinit"
-version = "0.0.0"
+version.workspace = true
 description = "PID 1 and service manager"
 edition.workspace = true
 rust-version.workspace = true

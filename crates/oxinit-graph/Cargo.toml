@@ -1,6 +1,6 @@
 [package]
 name = "oxinit-graph"
-version = "0.0.0"
+version.workspace = true
 description = "Dependency resolution and start ordering"
 edition.workspace = true
 rust-version.workspace = true

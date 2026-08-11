@@ -1,6 +1,6 @@
 [package]
 name = "oxinit-unit"
-version = "0.0.0"
+version.workspace = true
 description = "Unit file parsing and validation"
 edition.workspace = true
 rust-version.workspace = true

@@ -84,6 +84,14 @@ const SIGUSR2: u32 = libc::SIGUSR2 as u32;
 const SIGPWR: u32 = libc::SIGPWR as u32;
 
 fn main() -> ExitCode {
+    // Before the pid check, deliberately. `oxinit --version` has to work for
+    // somebody holding a binary and asking what it is, and that person is
+    // exactly the one who cannot run it as PID 1 to find out.
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("oxinit {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
     if !rustix::process::getpid().is_init() {
         eprintln!(
             "oxinit: running as pid {}, not 1. oxinit is an init system; \

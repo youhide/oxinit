@@ -1,6 +1,6 @@
 [package]
 name = "listen-probe"
-version = "0.0.0"
+version.workspace = true
 description = "Test fixture: a socket-activated service, and a client to poke it"
 edition.workspace = true
 rust-version.workspace = true

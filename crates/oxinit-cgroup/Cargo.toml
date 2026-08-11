@@ -1,6 +1,6 @@
 [package]
 name = "oxinit-cgroup"
-version = "0.0.0"
+version.workspace = true
 description = "cgroup v2 hierarchy, limits, accounting, and emptiness"
 edition.workspace = true
 rust-version.workspace = true

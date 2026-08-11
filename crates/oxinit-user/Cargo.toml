@@ -1,6 +1,6 @@
 [package]
 name = "oxinit-user"
-version = "0.0.0"
+version.workspace = true
 description = "Resolving a username against /etc/passwd and /etc/group"
 edition.workspace = true
 rust-version.workspace = true

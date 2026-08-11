@@ -6,7 +6,9 @@ A service manager and PID 1 for Linux, written in Rust.
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange)](ROADMAP.md)
 [![CI](https://github.com/youhide/oxinit/actions/workflows/ci.yml/badge.svg)](https://github.com/youhide/oxinit/actions/workflows/ci.yml)
 
-**Pre-alpha. Nothing is stable.** See [ROADMAP.md](ROADMAP.md) for what works.
+**Pre-alpha. Nothing is stable**, and the unit format may change between any
+two releases. See [ROADMAP.md](ROADMAP.md) for what works and what each
+milestone was verified against.
 
 ## What this is, in one picture
 

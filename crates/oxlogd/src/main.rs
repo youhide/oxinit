@@ -55,6 +55,11 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("oxlogd {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let dir = std::env::args()
         .skip_while(|arg| arg != "--dir")
         .nth(1)
