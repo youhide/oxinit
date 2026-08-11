@@ -27,6 +27,7 @@ commands:
   restart <unit>    stop, then start once it is down
   logs <unit>       what the unit has written, from /var/log/oxinit
   reload            re-read the unit directories
+  --version         which build this is
 
 `logs` reads the file directly. It does not go through oxinit: the control
 socket has to stay responsive, and bulk data is what would stop it being.
@@ -68,6 +69,11 @@ fn run(args: &[String]) -> Result<(), String> {
 
         ("start" | "stop" | "restart", None) => {
             return Err(format!("{command} needs a unit name\n\n{USAGE}"))
+        }
+
+        ("--version" | "-V", _) => {
+            println!("oxctl {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
         }
 
         ("" | "help" | "--help" | "-h", _) => {

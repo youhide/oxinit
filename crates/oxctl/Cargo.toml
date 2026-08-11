@@ -1,6 +1,6 @@
 [package]
 name = "oxctl"
-version = "0.0.0"
+version.workspace = true
 description = "Command-line client for oxinit"
 edition.workspace = true
 rust-version.workspace = true

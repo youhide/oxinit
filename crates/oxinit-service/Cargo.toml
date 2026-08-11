@@ -1,6 +1,6 @@
 [package]
 name = "oxinit-service"
-version = "0.0.0"
+version.workspace = true
 description = "Service state machine and restart policy"
 edition.workspace = true
 rust-version.workspace = true

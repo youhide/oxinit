@@ -1,6 +1,6 @@
 [package]
 name = "oxlogd"
-version = "0.0.0"
+version.workspace = true
 description = "Reads service output and writes it"
 edition.workspace = true
 rust-version.workspace = true

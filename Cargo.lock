@@ -47,7 +47,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "listen-probe"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"
@@ -57,14 +57,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "notify-probe"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "oxctl"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "oxinit-ipc",
  "oxinit-log",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "oxinit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "oxinit-cgroup",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "oxinit-cgroup"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "oxinit-unit",
  "thiserror",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "oxinit-graph"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "oxinit-unit",
  "thiserror",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "oxinit-ipc"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -114,22 +114,22 @@ dependencies = [
 
 [[package]]
 name = "oxinit-log"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "oxinit-service"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "oxinit-unit",
 ]
 
 [[package]]
 name = "oxinit-timer"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "oxinit-unit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "basic-toml",
  "oxinit-timer",
@@ -139,14 +139,14 @@ dependencies = [
 
 [[package]]
 name = "oxinit-user"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "oxlogd"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "oxinit-log",
  "rustix",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "zmij"
