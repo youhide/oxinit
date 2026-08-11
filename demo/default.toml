@@ -1,0 +1,16 @@
+# The demo. Everything reachable from here starts at boot.
+#
+# Deliberately small. The unit set under units/ is the test suite — it contains
+# services that fail on purpose, hang on purpose, and refuse to stop, because
+# that is what a test image is for. None of that belongs in the first thing
+# somebody sees.
+[target]
+
+[unit]
+description = "Demo"
+requires    = ["logs"]
+# `webhook-socket`, not `webhook`. The socket is what boot brings up; the
+# service it names is deliberately unreachable from here, so the only thing
+# that ever starts it is a connection.
+wants       = ["greeter", "clock", "webhook-socket", "counter"]
+after       = ["greeter"]

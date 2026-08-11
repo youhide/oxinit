@@ -160,6 +160,31 @@ jobs:
       # beyond the build.
       - run: cargo xtask container
 
+  demo:
+    name: the README's demo
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cpio
+
+      - name: Cache the boot artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/busybox-x86_64
+          key: alpine-v3.22-x86_64-shell
+
+      - run: cargo xtask fetch --arch x86_64
+
+      # Every command the README's opening section tells a newcomer to type.
+      # The demo is the first thing anybody sees, so it is the worst thing to
+      # let rot — and M13 already found what happens to an artifact nothing
+      # runs. A README that tells someone to type something that no longer
+      # works is worse than a README with nothing in it.
+      - run: cargo xtask test-demo
+
   distro:
     name: a real userspace
     runs-on: ubuntu-latest

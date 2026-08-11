@@ -1,0 +1,13 @@
+# The log writer. Everything with `output = "log"` goes through this, and
+# `oxctl logs NAME` reads what it wrote.
+#
+# `notify` means a unit ordered after this one does not start until oxlogd has
+# actually connected — not merely until it has been exec'd.
+[unit]
+description = "Log writer"
+
+[service]
+type        = "notify"
+exec        = "/bin/oxlogd"
+restart     = "always"
+restart-sec = "500ms"

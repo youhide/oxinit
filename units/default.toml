@@ -24,6 +24,7 @@ wants       = [
     "flaky",
     "signalled",
     "hangs-back",
+    "lingers",
     "specifiers",
     "muted",
     "reloader",

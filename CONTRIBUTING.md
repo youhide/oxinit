@@ -22,49 +22,38 @@ rustup target add aarch64-unknown-linux-musl
 MSRV is stable minus two releases. No nightly features are used.
 
 **Tools.** `qemu-system-x86_64`, `qemu-system-aarch64` and `cpio`. Docker or
-podman as well, if you are running `cargo xtask container`.
+podman as well, for `cargo xtask container`, `test-distro` and `test-demo`.
 
-**Boot artifacts.** One command per architecture:
+```bash
+# Debian/Ubuntu
+sudo apt install qemu-system-x86 qemu-system-arm cpio
+
+# Fedora
+sudo dnf install qemu-system-x86 qemu-system-aarch64 cpio
+
+# Arch
+sudo pacman -S qemu-system-x86 qemu-system-aarch64 cpio
+```
+
+**Boot artifacts.** A kernel and a statically linked shell per architecture.
+One command each:
 
 ```bash
 cargo xtask fetch --arch x86_64
 cargo xtask fetch --arch aarch64
 ```
 
-That downloads a kernel and a statically linked busybox from Alpine into
-`target/`, where `xtask` looks for them by name. `--kernel` and `--shell`
-override, and so do `$OXINIT_KERNEL_<ARCH>` and `$OXINIT_SHELL_<ARCH>`, if you
-would rather use a kernel you already have.
-
-```bash
-# Debian/Ubuntu
-sudo apt install qemu-system-x86 cpio
-
-# Fedora
-sudo dnf install qemu-system-x86 cpio
-
-# Arch
-sudo pacman -S qemu-system-x86 cpio
-```
-
-**Kernel.** You need a bootable `bzImage`. Any distribution kernel with cgroup
-v2 and devtmpfs works; on most Linux systems the installed one is in `/boot`.
+That downloads them from Alpine into `target/`, where `xtask` looks for them by
+name — `vmlinuz-<arch>` and `busybox-<arch>`. To use a kernel you already have
+instead, `--kernel` and `--shell` override, and so do `$OXINIT_KERNEL_<ARCH>`
+and `$OXINIT_SHELL_<ARCH>`. On a Linux host the installed kernel usually works:
 
 ```bash
 cargo xtask boot --kernel /boot/vmlinuz-$(uname -r)
 ```
 
-Or set it once:
-
-```bash
-export OXINIT_KERNEL=/path/to/bzImage
-```
-
-`xtask` looks for `--kernel`, then `OXINIT_KERNEL`, then a `bzImage` in the
-repository root.
-
-The kernel must have `CONFIG_DEVTMPFS`, `CONFIG_CGROUPS` with the v2 hierarchy,
-and `CONFIG_BLK_DEV_INITRD`. Kernel 5.14 or later, for `cgroup.kill`.
+Any kernel needs `CONFIG_DEVTMPFS`, `CONFIG_CGROUPS` with the v2 hierarchy, and
+`CONFIG_BLK_DEV_INITRD`. Version 5.14 or later, for `cgroup.kill`.
 
 ## Development loop
 
@@ -76,21 +65,18 @@ This builds a static `oxinit` for `x86_64-unknown-linux-musl`, packs it as
 `/init` into a cpio initramfs, and boots:
 
 ```bash
-qemu-system-x86_64 -kernel bzImage -initrd oxinit.cpio.gz -nographic -append "console=ttyS0"
+qemu-system-x86_64 -kernel target/vmlinuz-x86_64 \
+  -initrd target/oxinit-x86_64.cpio.gz -nographic -append "console=ttyS0"
 ```
 
 Edit to boot takes a few seconds. `-nographic` puts the guest serial console on
 your terminal. `Ctrl-A X` exits QEMU. `Ctrl-C` goes to the guest, not to QEMU.
 
-The image holds only `/init` unless you give it a shell:
-
-```bash
-cargo xtask boot --shell /path/to/busybox
-```
-
-It must be statically linked, since the image has no libraries. Without it the
-boot still exercises the mounts, console, signalfd, and reap loop, but oxinit
-has nothing to supervise and logs a spawn failure for `/bin/sh`.
+The image holds only `/init` unless there is a shell to put in it, which is
+what `cargo xtask fetch` provides. It must be statically linked, since the
+image has no libraries. Without one the boot still exercises the mounts, the
+console, the signalfd and the reap loop, but oxinit has nothing to supervise
+and logs a spawn failure for `/bin/sh`.
 
 Use this loop rather than reasoning about whether the boot path works. Early
 boot has too many ways to fail silently.
@@ -103,16 +89,14 @@ oxinit-graph` runs on any host with a Rust toolchain, and that is where most of
 
 Booting from macOS needs two extra pieces:
 
-- **A cross linker.** `rustup target add x86_64-unknown-linux-musl
-rustup target add aarch64-unknown-linux-musl` installs the
-  standard library but not something that can link it. Use
-  [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild), which needs
-  only `zig`, or a `musl-cross` toolchain from Homebrew with the linker
-  configured in `.cargo/config.toml`.
-- **Patience on Apple Silicon.** `qemu-system-x86_64` there is full emulation,
-  not virtualization, so the boot is a few seconds rather than under one. It
-  works. Building for `aarch64-unknown-linux-musl` and booting
-  `qemu-system-aarch64` is faster but is not the tested path.
+- **A cross linker.** `rustup target add` installs the standard library but not
+  something that can link it. `.cargo/config.toml` in this repository points
+  both musl targets at `rust-lld`, which ships with every rustup toolchain, so
+  this is already handled — but that is why the file exists.
+- **Patience for the foreign architecture.** Emulating the one your host is not
+  has no hardware acceleration behind it, and the whole boot runs through
+  QEMU's JIT. Both are tested — `cargo xtask test-boot --arch all` — and the
+  slower of the two takes about ninety seconds rather than about thirty.
 
 A Linux VM with a distribution kernel is the shorter route if you are doing
 kernel-facing work.
@@ -137,12 +121,14 @@ cargo test -p oxinit-timer                  # M8: schedules and the calendar
 cargo xtask test-boot                       # M5: boots QEMU, asserts on serial
 cargo xtask test-boot --arch all            # M9: x86_64 and aarch64, in turn
 cargo xtask container                       # M6: runs it in Docker, same
+cargo xtask test-demo                       # M16: every command the README gives
 cargo xtask test-distro                     # M10: a real Alpine userspace
 ```
 
-`oxinit-unit` and `oxinit-graph` will have no Linux dependencies and will run
-anywhere. Parser and graph logic belongs there, with tests, rather than in
-`oxinit`.
+The library crates have no Linux dependencies and run anywhere. Parser, graph,
+restart policy, log format and calendar arithmetic belong there, with tests,
+rather than in `oxinit` — which refuses to compile off Linux and so cannot be
+tested on a host at all.
 
 `test-boot` boots with a timeout and matches expected lines in the serial log. A
 test that hangs fails on the timeout instead of blocking the run.
@@ -151,6 +137,10 @@ test that hangs fails on the timeout instead of blocking the run.
 packs the same staged root filesystem as a `FROM scratch` image, runs it, stops
 it the way an operator would, and asserts on the log and the exit code.
 `--privileged` adds a writable cgroupfs and the assertions that need one.
+
+`test-demo` runs every command the README's opening section tells a newcomer to
+type, against the image built from `demo/`. That README is the first thing
+anybody reads, and this is what stops it quietly ceasing to be true.
 
 ## Code policy
 
@@ -165,11 +155,14 @@ in PID 1 is a kernel panic.
 **No async in `crates/oxinit`.** One thread, one `epoll` loop. Other crates are
 unconstrained.
 
-**Unsafe is quarantined.** Syscalls go through `rustix`. Anything `rustix` does
-not cover lives in `oxinit::sys::raw`, with a `// SAFETY:` comment per block
-stating the invariant and why it holds at that call site. A PR adding `unsafe`
-elsewhere will be asked to move it. A PR adding `unsafe` without a `// SAFETY:`
-comment will be asked to write one.
+**Unsafe is quarantined, and the build enforces it.** Syscalls go through
+`rustix`. Anything `rustix` does not cover lives in `oxinit::sys::raw`, with a
+`// SAFETY:` comment per block stating the invariant and why it holds at that
+call site. The `oxinit` crate denies `unsafe_code` with that one module
+relaxing it, and every crate that should contain none carries `forbid`, so a PR
+adding `unsafe` elsewhere does not compile rather than being asked to move it.
+A PR adding one to `sys::raw` without a `// SAFETY:` comment will be asked to
+write one.
 
 **Dependencies need a reason.** The dependency tree of PID 1 is part of its
 attack surface. State the reason in the commit message.

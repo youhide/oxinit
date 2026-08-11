@@ -1,0 +1,9 @@
+# Runs once and exits. `oneshot` means "started" is not enough — the unit is
+# not finished until the process has exited successfully, and anything ordered
+# after it waits for that.
+[unit]
+description = "Says hello, once"
+
+[service]
+type = "oneshot"
+exec = '/bin/sh -c "/bin/echo; /bin/echo \"  oxinit is PID 1 here. Try: docker exec -it oxinit-demo /bin/oxctl list\"; /bin/echo"'

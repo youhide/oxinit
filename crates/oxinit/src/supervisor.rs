@@ -666,7 +666,15 @@ impl Supervisor {
             let deactivating = instance.state == State::Deactivating;
             let oneshot = ty == Some(ServiceType::Oneshot);
 
+            let going_down = self.shutdown.is_some();
+
             match instance.on_exit(exit) {
+                // Same as above: on the way down a restart is a unit `settled`
+                // waits for and nothing ever starts.
+                Some(_) if going_down => {
+                    instance.cancel_restart();
+                    println!("oxinit: {name} {exit}; not restarting, the machine is going down");
+                }
                 Some(delay) => {
                     println!(
                         "oxinit: {name} {exit}, restarting in {:?} (restart {})",
@@ -810,7 +818,19 @@ impl Supervisor {
             return;
         }
 
+        let going_down = self.shutdown.is_some();
+
         match instance.deactivated() {
+            // Nothing comes back on the way down, and a unit left `Restarting`
+            // is a unit `settled` waits for — so this would hold the machine
+            // open until the whole-shutdown deadline and then go down anyway.
+            // `stop` has always cancelled a pending backoff for exactly this
+            // reason; the hole was a stop that *completes* mid-shutdown and
+            // takes the policy on the way out.
+            Some(_) if going_down => {
+                instance.cancel_restart();
+                println!("oxinit: {name} stopped; not restarting, the machine is going down");
+            }
             Some(delay) => {
                 println!(
                     "oxinit: {name} stopped, restarting in {:?} (restart {})",

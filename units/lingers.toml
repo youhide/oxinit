@@ -1,0 +1,24 @@
+# Still deactivating when the machine is asked to go down, with a restart
+# policy that would apply.
+#
+# That combination hung PID 1's shutdown for the full ninety-second deadline:
+# the watchdog stop completes *during* shutdown, the policy puts the unit in
+# `Restarting`, and `settled` waits for every unit that is not `Inactive` or
+# `Failed`. Nothing ever started it again — `start` refuses while going down —
+# so the machine sat there until the backstop fired.
+#
+# The timing is deliberate, not incidental. It misses its watchdog about
+# thirteen seconds after the default target, and ignores `SIGTERM` so that
+# only `cgroup.kill` at `stop-sec` ends it, twelve seconds later. The test
+# image asks oxinit to shut down sixteen seconds after the target — inside that
+# window with margin on both sides.
+[unit]
+description = "Deactivates across a shutdown"
+
+[service]
+type         = "notify"
+exec         = "/bin/notify-probe --hang-after 10 --ignore-term"
+watchdog-sec = "3s"
+stop-sec     = "12s"
+restart      = "on-failure"
+restart-sec  = "500ms"
