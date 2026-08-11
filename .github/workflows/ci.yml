@@ -68,6 +68,12 @@ jobs:
           fi
           echo "README and CI agree on $WANT"
 
+      # The v0.1.0 notes shipped with an empty ```bash block, from editing the
+      # heredoc by string substitution and never rendering the result.
+      # Markdown has no compiler; this is the compiler.
+      - name: The release notes would render
+        run: python3 .github/scripts/check-release-notes.py
+
       - name: Host tests
         run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer
 

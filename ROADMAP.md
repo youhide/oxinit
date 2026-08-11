@@ -1000,6 +1000,31 @@ and runs.
 The lesson is the same one the bug taught, applied to the fix: the reason to
 run the command is that reasoning about what it will do is not the same thing.
 
+### v0.1.0, and an empty code block in its notes
+
+The release workflow worked on its first run: both architectures' tarballs with
+checksums, the versioned image, and notes generated from the merged pull
+requests. Verified by downloading what was published rather than trusting what
+was built — both checksums match, and the binaries out of both tarballs report
+`0.1.0` under emulation.
+
+The notes shipped with an empty ```` ```bash ```` block in them, reported by
+the first person to read them.
+
+It came from editing the heredoc that writes those notes by string
+substitution: the insertion ended with an opening fence directly above a
+closing fence that was already there. The diff looked fine. Nothing rendered
+the result, and Markdown has no compiler to complain.
+
+So CI has one now. `.github/scripts/check-release-notes.py` renders the header
+the way the workflow does and fails on unbalanced fences or empty blocks —
+which are exactly the two mistakes that survive review by looking correct in a
+diff. The published v0.1.0 notes were edited in place.
+
+Third time in this project that the failure was *editing text without looking
+at the output*, and the second time it reached somebody. It is worth naming as
+a pattern rather than as three separate slips.
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than

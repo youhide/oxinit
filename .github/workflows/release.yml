@@ -130,9 +130,6 @@ jobs:
           `ghcr.io/OWNER/oxinit:demo` tracks `main` if you would rather have the
           latest.
 
-          ```bash
-          ```
-
           ### Install
 
           Download the tarball for your architecture below, check it, and put
