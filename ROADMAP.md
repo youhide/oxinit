@@ -990,11 +990,15 @@ And CI checks that the image reference in the README is the one the publish
 step pushes. That is the half a test on a locally built image structurally
 cannot cover, and it is the half that failed.
 
-One thing here is not automatable: a package pushed by Actions is **private by
-default**, and an anonymous `docker run` against a private package fails with
-exactly the `denied` that was reported. Making it public is a one-time setting
-on the repository's package page, and it belongs to whoever owns the account
-rather than to CI.
+One claim written here while fixing it was wrong, and is corrected rather than
+quietly deleted: that a package pushed by Actions is private by default and
+would need a manual visibility change. It is not, for a package pushed from a
+public repository — it inherits the repository's visibility. Verified by
+logging out of the registry and running the reported command, which now pulls
+and runs.
+
+The lesson is the same one the bug taught, applied to the fix: the reason to
+run the command is that reasoning about what it will do is not the same thing.
 
 ## Not doing, and why
 
