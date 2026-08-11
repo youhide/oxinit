@@ -81,18 +81,20 @@ jobs:
       # demo/, not units/ — the latter is the test suite and contains services
       # that fail on purpose.
       - name: Build the demo image
-        run: cargo xtask demo --build-only --tag ghcr.io/${{ github.repository_owner }}/oxinit:demo
+        run: cargo xtask demo --build-only
 
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      # Only the versioned tag. `:demo` tracks `main` and is published by CI,
+      # because it is documentation rather than a release artifact — the README
+      # points at it, and a README should not be waiting on a version number
+      # somebody has not decided to declare yet.
       - name: Push
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          docker tag ghcr.io/${{ github.repository_owner }}/oxinit:demo ghcr.io/$OWNER/oxinit:demo
-          docker tag ghcr.io/$OWNER/oxinit:demo ghcr.io/$OWNER/oxinit:${{ github.ref_name }}
-          docker push ghcr.io/$OWNER/oxinit:demo
-          docker push ghcr.io/$OWNER/oxinit:${{ github.ref_name }}
+          docker tag oxinit:demo "ghcr.io/$OWNER/oxinit:${{ github.ref_name }}"
+          docker push "ghcr.io/$OWNER/oxinit:${{ github.ref_name }}"
 
   release:
     name: publish
@@ -123,6 +125,12 @@ jobs:
 
           ```bash
           docker run --rm --name oxinit-demo -p 8080:8080 ghcr.io/OWNER/oxinit:TAG
+          ```
+
+          `ghcr.io/OWNER/oxinit:demo` tracks `main` if you would rather have the
+          latest.
+
+          ```bash
           ```
 
           ### Install

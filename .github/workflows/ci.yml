@@ -49,6 +49,25 @@ jobs:
       # The library crates have no OS dependency and run on the host. The
       # parser, the graph, the restart policy, the log format and the calendar
       # arithmetic are where the logic errors are.
+      # `test-demo` builds the image locally and checks it, which is what let
+      # the README ship a `docker run ghcr.io/...` line pointing at something
+      # that had never been published: the test and the README were talking
+      # about different images. This checks they agree on the name, which is
+      # the half a test on a locally-built image structurally cannot.
+      - name: The README's image reference is the one CI publishes
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          WANT="ghcr.io/$OWNER/oxinit:demo"
+          if ! grep -qF "$WANT" README.md; then
+            echo "README.md does not mention $WANT, which is what CI pushes"
+            exit 1
+          fi
+          if ! grep -qF 'oxinit:demo' .github/workflows/ci.yml; then
+            echo "the publish step no longer pushes the tag the README names"
+            exit 1
+          fi
+          echo "README and CI agree on $WANT"
+
       - name: Host tests
         run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer
 
@@ -164,6 +183,9 @@ jobs:
     name: the README's demo
     runs-on: ubuntu-latest
     needs: check
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add x86_64-unknown-linux-musl
@@ -184,6 +206,19 @@ jobs:
       # runs. A README that tells someone to type something that no longer
       # works is worse than a README with nothing in it.
       - run: cargo xtask test-demo
+
+      # The demo image is documentation, not a release artifact, so it is
+      # published from `main` rather than from a tag. Tying it to a release
+      # meant the README told people to pull something that would not exist
+      # until a version number had been declared — which is a separate
+      # decision, and was not going to be made that week.
+      - name: Publish the demo image
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker tag oxinit:demo "ghcr.io/$OWNER/oxinit:demo"
+          docker push "ghcr.io/$OWNER/oxinit:demo"
 
   distro:
     name: a real userspace

@@ -30,10 +30,17 @@ flowchart TD
 That is deliberate: a bug in the log writer kills the log writer, and a bug in
 PID 1 kills the machine.
 
-## Try it — one command
+## Try it
 
-You need [Docker](https://docs.docker.com/get-started/get-docker/) and nothing
-else. No Rust, no virtual machine, no kernel.
+You need [Docker](https://docs.docker.com/get-started/get-docker/) and a Rust
+toolchain. Two commands:
+
+```bash
+cargo xtask fetch --arch x86_64   # a kernel and a busybox, into target/
+cargo xtask demo                  # build the image and run it
+```
+
+Or pull the image, which tracks `main` and needs no toolchain at all:
 
 ```bash
 docker run --rm --name oxinit-demo -p 8080:8080 ghcr.io/youhide/oxinit:demo
@@ -81,14 +88,8 @@ for each to actually be gone, and exits `0`. Most container images have to be
 killed after a ten-second grace period; that shows up as exit code 137.
 
 The units the demo runs are in [demo/](demo/), one small file each, and they
-are meant to be read.
-
-To build and run it yourself instead of pulling the published image:
-
-```bash
-cargo xtask fetch --arch x86_64   # a kernel and a busybox, into target/
-cargo xtask demo                  # build the image and run it
-```
+are meant to be read. The image is 4.6 MB — statically linked against musl,
+`FROM scratch`, no base image and no shared libraries.
 
 ## Why
 
