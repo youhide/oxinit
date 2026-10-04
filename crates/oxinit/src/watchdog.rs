@@ -48,7 +48,7 @@ impl Watchdog {
         let config = match load().and_then(Settings::resolve) {
             Ok(config) => config?,
             Err(e) => {
-                eprintln!("oxinit: watchdog: {e}; not opening the watchdog");
+                report!("oxinit: watchdog: {e}; not opening the watchdog");
                 return None;
             }
         };
@@ -98,7 +98,7 @@ impl Watchdog {
     /// different configuration, not a smaller version of it.
     pub fn check_boot_unit(&self, known: bool) {
         if let (Some(unit), false) = (self.awaiting(), known) {
-            eprintln!(
+            report!(
                 "oxinit: watchdog: boot-unit `{unit}` is not a loaded unit; \
                  nothing can confirm this boot, and the watchdog will reset it"
             );
@@ -129,7 +129,7 @@ impl Watchdog {
             }
             Some(Event::BootOverdue) => {
                 let config = self.policy.config();
-                eprintln!(
+                report!(
                     "oxinit: watchdog: the boot did not reach {} within {} s; \
                      no longer feeding {}, which resets the machine when its \
                      {} s timeout runs out",
@@ -162,7 +162,7 @@ impl Watchdog {
                 // at all, and says so in the kernel log.
                 match rustix::io::write(&device, b"V") {
                     Ok(_) => println!("oxinit: watchdog: stopped"),
-                    Err(e) => eprintln!("oxinit: watchdog: stop: {e}"),
+                    Err(e) => report!("oxinit: watchdog: stop: {e}"),
                 }
                 drop(device);
             }
@@ -190,7 +190,7 @@ impl Watchdog {
             Ok(device) => device,
             Err(e) => {
                 if !self.reported_missing {
-                    eprintln!(
+                    report!(
                         "oxinit: watchdog: open {path}: {e}; looking again as it may yet appear"
                     );
                     self.reported_missing = true;
@@ -204,7 +204,7 @@ impl Watchdog {
         let applied = match raw::watchdog_set_timeout(device.as_fd(), wanted) {
             Ok(applied) => Some(applied),
             Err(e) => {
-                eprintln!("oxinit: watchdog: {path} would not take a {wanted} s timeout: {e}");
+                report!("oxinit: watchdog: {path} would not take a {wanted} s timeout: {e}");
                 raw::watchdog_get_timeout(device.as_fd()).ok()
             }
         };
@@ -229,7 +229,7 @@ impl Watchdog {
         // Any byte but `V` is a keepalive. Not the ioctl: a write is what
         // every driver has understood since before the ioctl existed.
         if let Err(e) = rustix::io::write(device, b"\0") {
-            eprintln!("oxinit: watchdog: {e}");
+            report!("oxinit: watchdog: {e}");
         }
     }
 }

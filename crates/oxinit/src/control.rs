@@ -99,7 +99,7 @@ impl Control {
         let fd = rustix::net::accept_with(&self.listener, SocketFlags::CLOEXEC).ok()?;
 
         if self.clients.len() >= MAX_CLIENTS {
-            eprintln!("oxinit: control: {MAX_CLIENTS} clients already connected; refusing");
+            report!("oxinit: control: {MAX_CLIENTS} clients already connected; refusing");
             return None;
         }
 
@@ -135,7 +135,7 @@ impl Control {
             return None;
         }
         if sent > buf.len() {
-            eprintln!("oxinit: control: {sent} byte request over the {MAX_MESSAGE} byte limit");
+            report!("oxinit: control: {sent} byte request over the {MAX_MESSAGE} byte limit");
             return None;
         }
 
@@ -152,7 +152,7 @@ impl Control {
         // socket: it either fits or it is refused, and the size was checked
         // when the message was encoded.
         if let Err(e) = rustix::net::send(&client.fd, message, SendFlags::empty()) {
-            eprintln!("oxinit: control: reply: {e}");
+            report!("oxinit: control: reply: {e}");
         }
     }
 

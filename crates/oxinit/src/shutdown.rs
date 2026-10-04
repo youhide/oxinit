@@ -126,7 +126,7 @@ pub fn finalize(
     // remounted read-only, and failing here would strand a machine that was
     // about to shut down cleanly.
     if let Err(e) = rustix::mount::mount_remount("/", rustix::mount::MountFlags::RDONLY, "") {
-        eprintln!("oxinit: remount / read-only: {e}");
+        report!("oxinit: remount / read-only: {e}");
     }
 
     if let Some(watchdog) = watchdog {

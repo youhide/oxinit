@@ -123,7 +123,7 @@ impl Logs {
         };
 
         if self.shipper.is_some() {
-            eprintln!("oxinit: logs: a shipper is already connected; refusing");
+            report!("oxinit: logs: a shipper is already connected; refusing");
             return false;
         }
 
@@ -147,7 +147,7 @@ impl Logs {
     /// a replacement is a restart away.
     pub fn disconnect(&mut self) {
         if self.shipper.take().is_some() {
-            eprintln!("oxinit: logs: shipper gone; output is buffering in the pipes");
+            report!("oxinit: logs: shipper gone; output is buffering in the pipes");
         }
     }
 
@@ -228,7 +228,7 @@ fn offer(shipper: Option<&OwnedFd>, unit: &str, fd: BorrowedFd<'_>) {
     let rights = [fd];
 
     if !ancillary.push(SendAncillaryMessage::ScmRights(&rights)) {
-        eprintln!("oxinit: logs: {unit}: no room for the descriptor");
+        report!("oxinit: logs: {unit}: no room for the descriptor");
         return;
     }
 
@@ -238,6 +238,6 @@ fn offer(shipper: Option<&OwnedFd>, unit: &str, fd: BorrowedFd<'_>) {
         &mut ancillary,
         SendFlags::DONTWAIT,
     ) {
-        eprintln!("oxinit: logs: {unit}: {e}");
+        report!("oxinit: logs: {unit}: {e}");
     }
 }

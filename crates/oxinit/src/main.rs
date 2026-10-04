@@ -30,6 +30,23 @@ compile_error!(
      or use `cargo xtask boot`. See CONTRIBUTING.md."
 );
 
+/// One line to stderr, in one write(2).
+///
+/// `eprintln!` formats straight into stderr, which is unbuffered: a write
+/// for each piece of the format string. On the console, where every
+/// service writes too, another process's output then lands between the
+/// pieces — CI caught a shell's cursor query inside `requires \`broken\``.
+/// Formatted first, the line goes out whole. stdout needs nothing: it is
+/// line-buffered, so `println!` already writes a line at a time.
+macro_rules! report {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let mut line = format!($($arg)*);
+        line.push('\n');
+        let _ = std::io::stderr().write_all(line.as_bytes());
+    }};
+}
+
 mod cgroup;
 mod console;
 mod container;
@@ -114,7 +131,7 @@ fn main() -> ExitCode {
     }
 
     if !init {
-        eprintln!(
+        report!(
             "oxinit: running as pid {}, not 1. oxinit is an init system; \
              it is not meant to be run from a shell.",
             std::process::id()
@@ -132,7 +149,7 @@ fn boot() -> ! {
     let mounted = mounts::mount_all();
 
     if let Err(e) = console::attach() {
-        eprintln!("oxinit: {e}");
+        report!("oxinit: {e}");
     }
 
     // After the mounts, because the last of the checks reads `/proc`; before
@@ -150,7 +167,7 @@ fn boot() -> ! {
 
     let (hostname, failure) = mounts::set_hostname();
     if let Some(e) = failure {
-        eprintln!("oxinit: {e}; using the name already set, {hostname}");
+        report!("oxinit: {e}; using the name already set, {hostname}");
     }
 
     // Signals become event loop input rather than interruptions. Blocking must
@@ -159,7 +176,7 @@ fn boot() -> ! {
     let signals = match open_signalfd() {
         Ok(fd) => fd,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             fallback(None)
         }
     };
@@ -167,7 +184,7 @@ fn boot() -> ! {
     let timers = match timer::Timers::new() {
         Ok(timers) => timers,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             fallback(Some(&signals))
         }
     };
@@ -175,7 +192,7 @@ fn boot() -> ! {
     let mut events = match event::EventLoop::new() {
         Ok(events) => events,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             fallback(Some(&signals))
         }
     };
@@ -185,7 +202,7 @@ fn boot() -> ! {
     let notify = match notify::Notify::bind(&paths.notify()) {
         Ok(notify) => notify,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             fallback(Some(&signals))
         }
     };
@@ -196,8 +213,8 @@ fn boot() -> ! {
     let mut control = match control::Control::bind(&paths.control()) {
         Ok(control) => Some(control),
         Err(e) => {
-            eprintln!("oxinit: {e}");
-            eprintln!("oxinit: continuing without a control socket");
+            report!("oxinit: {e}");
+            report!("oxinit: continuing without a control socket");
             None
         }
     };
@@ -208,8 +225,8 @@ fn boot() -> ! {
     let cgroups = match cgroup::Cgroups::open(oxinit_cgroup::CGROUP_ROOT) {
         Ok(cgroups) => cgroups,
         Err(e) => {
-            eprintln!("oxinit: {e}");
-            eprintln!("oxinit: continuing without cgroups");
+            report!("oxinit: {e}");
+            report!("oxinit: continuing without cgroups");
             cgroup::Cgroups::unavailable()
         }
     };
@@ -220,8 +237,8 @@ fn boot() -> ! {
     let logs = match logs::Logs::bind(&paths.log_socket()) {
         Ok(logs) => logs,
         Err(e) => {
-            eprintln!("oxinit: {e}");
-            eprintln!("oxinit: continuing without log shipping");
+            report!("oxinit: {e}");
+            report!("oxinit: continuing without log shipping");
             logs::Logs::unavailable()
         }
     };
@@ -236,14 +253,14 @@ fn boot() -> ! {
     );
 
     if let Err(e) = wire(&events, &signals, &supervisor, control.as_ref()) {
-        eprintln!("oxinit: {e}");
+        report!("oxinit: {e}");
         fallback(Some(&signals));
     }
 
     // With nothing to supervise, keep the machine usable the way M0 did.
     let mut shell = if supervisor.is_empty() {
-        eprintln!("oxinit: nothing to start; falling back to a console shell");
-        shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok()
+        report!("oxinit: nothing to start; falling back to a console shell");
+        shell::spawn().map_err(|e| report!("oxinit: {e}")).ok()
     } else {
         supervisor.start_all();
         None
@@ -296,13 +313,13 @@ fn wire(
 
     if let Some(control) = control {
         if let Err(e) = events.register(control.as_fd(), event::Source::Control) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
         }
     }
 
     if let Some(fd) = supervisor.logs.listener() {
         if let Err(e) = events.register(fd, event::Source::LogSocket) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
         }
     }
 
@@ -311,7 +328,7 @@ fn wire(
     // rather than an epoll call on every start and stop.
     for (id, fd) in supervisor.cgroups.events() {
         if let Err(e) = events.register_pri(fd, event::Source::Cgroup(id)) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
         }
     }
 
@@ -339,14 +356,14 @@ fn report_mounts(mounted: &mounts::Mounts) {
         } else {
             "them"
         };
-        eprintln!(
+        report!(
             "oxinit: not permitted to mount {}; continuing without {them}",
             mounted.refused.join(", ")
         );
     }
 
     for failure in &mounted.failures {
-        eprintln!("oxinit: {failure}");
+        report!("oxinit: {failure}");
     }
 }
 
@@ -380,7 +397,7 @@ fn run(
         // for. A machine that has one configured resets, rather than waiting
         // on the console for someone who may never come.
         if let Err(e) = events.wait(&mut sources, timeout) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             // A failing epoll would spin this loop at full speed.
             cannot_continue(signals, environment);
         }
@@ -407,7 +424,7 @@ fn run(
             }));
 
             if result.is_err() {
-                eprintln!("oxinit: handler panicked; continuing");
+                report!("oxinit: handler panicked; continuing");
             }
         }
 
@@ -417,7 +434,7 @@ fn run(
         // idempotent, and it cannot be forgotten in a path added later.
         let result = catch_unwind(AssertUnwindSafe(|| supervisor.pump()));
         if result.is_err() {
-            eprintln!("oxinit: start queue panicked; continuing");
+            report!("oxinit: start queue panicked; continuing");
         }
 
         // One reconciliation per wake-up rather than an arm/disarm call inside
@@ -425,7 +442,7 @@ fn run(
         // cannot be forgotten in a path added later.
         let result = catch_unwind(AssertUnwindSafe(|| supervisor.sync_sockets(events)));
         if result.is_err() {
-            eprintln!("oxinit: socket reconciliation panicked; continuing");
+            report!("oxinit: socket reconciliation panicked; continuing");
         }
 
         // After everything else, so the boot unit's state is this wake-up's.
@@ -440,7 +457,7 @@ fn run(
                 watchdog.tick(booted, supervisor.shutting_down());
             }));
             if result.is_err() {
-                eprintln!("oxinit: watchdog panicked; continuing");
+                report!("oxinit: watchdog panicked; continuing");
             }
         }
 
@@ -453,8 +470,8 @@ fn run(
                 // exits inside `finalize` and never reaches here. PID 1
                 // exiting is a kernel panic, so the only option left is to
                 // stay up and say so.
-                eprintln!("oxinit: {action}: {e}");
-                eprintln!("oxinit: cannot go down; staying up with everything stopped");
+                report!("oxinit: {action}: {e}");
+                report!("oxinit: cannot go down; staying up with everything stopped");
                 cannot_continue(signals, environment);
             }
         }
@@ -469,7 +486,7 @@ fn on_signals(
     environment: &container::Environment,
 ) {
     if let Err(e) = sys::raw::read_signals(signals, pending).map_err(Error::ReadSignalFd) {
-        eprintln!("oxinit: {e}");
+        report!("oxinit: {e}");
         return;
     }
 
@@ -486,8 +503,8 @@ fn on_signals(
                         if supervisor.shutting_down() {
                             *shell = None;
                         } else {
-                            eprintln!("oxinit: {} exited; respawning", shell::SHELL);
-                            *shell = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+                            report!("oxinit: {} exited; respawning", shell::SHELL);
+                            *shell = shell::spawn().map_err(|e| report!("oxinit: {e}")).ok();
                         }
                     }
                 }
@@ -561,7 +578,7 @@ fn on_request(
 
         match oxinit_ipc::encode(&response) {
             Ok(bytes) => control.reply(id, &bytes),
-            Err(e) => eprintln!("oxinit: control: {e}"),
+            Err(e) => report!("oxinit: control: {e}"),
         }
     }
 
@@ -586,7 +603,7 @@ fn on_shipper(supervisor: &mut supervisor::Supervisor, events: &event::EventLoop
     };
 
     if let Err(e) = events.register(fd, event::Source::LogShipper) {
-        eprintln!("oxinit: {e}");
+        report!("oxinit: {e}");
         supervisor.logs.disconnect();
     }
 }
@@ -624,8 +641,8 @@ fn cannot_continue(signals: &OwnedFd, environment: &container::Environment) -> !
 /// Last resort. The loop cannot continue, so give an operator a shell and keep
 /// reaping. PID 1 exiting is a kernel panic, so this never returns.
 fn fallback(signals: Option<&OwnedFd>) -> ! {
-    eprintln!("oxinit: event loop unavailable; falling back to a console shell");
-    let mut child = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+    report!("oxinit: event loop unavailable; falling back to a console shell");
+    let mut child = shell::spawn().map_err(|e| report!("oxinit: {e}")).ok();
     let mut pending = Vec::new();
 
     loop {
@@ -645,7 +662,7 @@ fn fallback(signals: Option<&OwnedFd>) -> ! {
         });
 
         if dead || child.is_none() {
-            child = shell::spawn().map_err(|e| eprintln!("oxinit: {e}")).ok();
+            child = shell::spawn().map_err(|e| report!("oxinit: {e}")).ok();
         }
     }
 }

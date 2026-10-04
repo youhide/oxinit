@@ -39,21 +39,21 @@ pub fn boot() -> ExitCode {
     if uid.is_root() {
         // Root's services are system units. A root user manager would be a
         // second system manager with none of PID 1's guarantees.
-        eprintln!("oxinit: --user is for users; root's services are system units");
+        report!("oxinit: --user is for users; root's services are system units");
         return ExitCode::FAILURE;
     }
 
     let paths = match Paths::user_from_env() {
         Ok(paths) => paths,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             return ExitCode::FAILURE;
         }
     };
     let name = oxinit_user::name_of_system(uid.as_raw());
 
     if let Err(e) = private_dir(&paths.runtime_dir) {
-        eprintln!("oxinit: {}: {e}", paths.runtime_dir.display());
+        report!("oxinit: {}: {e}", paths.runtime_dir.display());
         return ExitCode::FAILURE;
     }
 
@@ -69,13 +69,13 @@ pub fn boot() -> ExitCode {
     // `forking` daemon's real process is one, and it has to be reaped by the
     // manager that is supervising it.
     if let Err(e) = rustix::process::set_child_subreaper(Some(rustix::process::getpid())) {
-        eprintln!("oxinit: become a subreaper: {e}; orphans will go to pid 1");
+        report!("oxinit: become a subreaper: {e}; orphans will go to pid 1");
     }
 
     let signals = match crate::open_signalfd() {
         Ok(fd) => fd,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -87,7 +87,7 @@ pub fn boot() -> ExitCode {
     ) {
         (Ok(timers), Ok(events), Ok(notify)) => (timers, events, notify),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -98,7 +98,7 @@ pub fn boot() -> ExitCode {
     let control = match control::Control::bind(&paths.control()) {
         Ok(control) => control,
         Err(e) => {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -106,7 +106,7 @@ pub fn boot() -> ExitCode {
     let logs = match logs::Logs::bind(&paths.log_socket()) {
         Ok(logs) => logs,
         Err(e) => {
-            eprintln!("oxinit: {e}; continuing without log shipping");
+            report!("oxinit: {e}; continuing without log shipping");
             logs::Logs::unavailable()
         }
     };
@@ -140,7 +140,7 @@ pub fn boot() -> ExitCode {
     let mut supervisor = Supervisor::load(&hostname, source, timers, notify, cgroups, logs);
 
     if let Err(e) = crate::wire(&events, &signals, &supervisor, Some(&control)) {
-        eprintln!("oxinit: {e}");
+        report!("oxinit: {e}");
         return ExitCode::FAILURE;
     }
 
@@ -168,7 +168,7 @@ pub fn boot() -> ExitCode {
 /// Its services are left running, reparented to PID 1. Stopping them here
 /// would mean running the shutdown this loop can no longer run.
 pub fn give_up() -> ! {
-    eprintln!("oxinit: the user manager cannot continue; exiting");
+    report!("oxinit: the user manager cannot continue; exiting");
     std::process::exit(1)
 }
 
