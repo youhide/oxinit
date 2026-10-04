@@ -14,5 +14,6 @@ publish.workspace = true
 # No Linux dependencies. The encoding is where a protocol bug would hide, and
 # it is tested on the host.
 [dependencies]
+oxinit-paths = { path = "../oxinit-paths" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

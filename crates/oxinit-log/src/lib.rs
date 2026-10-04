@@ -22,15 +22,17 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Where `oxlogd` writes, and where `oxctl logs` reads.
-pub const LOG_DIR: &str = "/var/log/oxinit";
+/// Where `oxlogd` writes, and where `oxctl logs` reads — for the system. A
+/// user manager's logs are under that user's state directory; `oxinit-paths`
+/// has both.
+pub const LOG_DIR: &str = oxinit_paths::system::LOG_DIR;
 
 /// Where `oxinit` listens for `oxlogd`.
 ///
 /// PID 1 is the server. It already owns a listening socket and an event loop;
 /// the other direction would have PID 1 connecting to a service it supervises,
 /// at every service start, and deciding what to do when that connect fails.
-pub const SOCKET_PATH: &str = "/run/oxinit/log.sock";
+pub const SOCKET_PATH: &str = oxinit_paths::system::LOG_SOCKET;
 
 /// The largest message on that socket.
 ///

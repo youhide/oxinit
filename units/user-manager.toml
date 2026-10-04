@@ -1,0 +1,11 @@
+# nobody's own oxinit. A session would start it; a test image has no session,
+# so a system unit stands in, with the environment a session would have set.
+# Its units are in /etc/oxinit/user-units — units/user/ in this tree.
+[unit]
+description = "The user manager for nobody"
+requires    = ["user-runtime"]
+after       = ["user-runtime"]
+
+[service]
+user = "nobody"
+exec = '/bin/sh -c "XDG_RUNTIME_DIR=/run/user/65534 HOME=/run/user/65534 exec /init --user"'

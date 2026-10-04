@@ -85,6 +85,35 @@ An empty file in `/etc` does not mask the packaged unit — it is a unit with no
 kind section, which is a load error. To disable a unit, remove it from the
 dependencies of the target that pulls it in.
 
+### User units
+
+A user manager — `oxinit --user`, see ARCHITECTURE.md — reads the same format
+from three directories, each replacing a file of the same name in the ones
+before it, wholly:
+
+| Directory                                | Purpose                                  |
+|------------------------------------------|------------------------------------------|
+| `/usr/lib/oxinit/user-units/`            | Units shipped by packages, for every user. |
+| `/etc/oxinit/user-units/`                | The operator's, for every user.          |
+| `$XDG_CONFIG_HOME/oxinit/user-units/`    | The user's own. `~/.config` when unset.  |
+
+The user is the operator of their own manager, so their directory comes last.
+A user manager starts its own `default`, as PID 1 does.
+
+Everything in this document applies to a user unit, except:
+
+- `user` is a load error. Every service runs as the user the manager runs as;
+  there is no one else it could run one as, and a unit asking for someone
+  else and silently getting the user would not be doing what it says.
+- `tty = true` is a load error. The terminal belongs to the user's session.
+- `%u` is the user the manager runs as.
+- `output = "log"` goes to `oxlogd --user`, which writes under
+  `$XDG_STATE_HOME/oxinit/log/` (`~/.local/state` when unset).
+- `[resources]`, `type = "forking"` and the `cgroup.kill` escalation need a
+  cgroup the user may write to. Without one, which is the usual case, a unit
+  using the first two fails to start, saying why, and a stop that times out
+  can kill only the main process.
+
 ## Example
 
 ```toml
@@ -381,6 +410,8 @@ has.
 
 An unresolvable username at start time fails the unit.
 
+Not allowed in a user unit. See [User units](#user-units).
+
 ### `tty`
 
 - **Type:** boolean
@@ -405,6 +436,8 @@ terminal for *every* service.
 Failing to get the terminal does not fail the unit. A service that cannot be
 given job control is a nuisance; a console that will not start is a machine
 with no way in.
+
+`tty = true` is not allowed in a user unit. See [User units](#user-units).
 
 ### `output`
 
@@ -786,7 +819,7 @@ is split into argv. This is the only runtime interpolation in the format.
 | `%n`      | The unit name, e.g. `sshd`.                   |
 | `%N`      | The fully-qualified name, e.g. `sshd.service`. |
 | `%H`      | The hostname at the time of expansion.        |
-| `%u`      | The value of `user`.                          |
+| `%u`      | The value of `user`; in a user unit, the user the manager runs as. |
 | `%%`      | A literal `%`.                                |
 
 An unrecognised specifier is a load error. The set is closed and will grow only
@@ -816,6 +849,7 @@ The parser rejects, at load time:
 - A unit named in both `requires` and `conflicts`.
 - A cycle in the `after`/`before` edges, reported with the cycle path.
 - A `exec` whose first element is not an absolute path.
+- In a user unit, `user`, or `tty = true`.
 
 A load error means oxinit does not start with that unit set. It does not skip
 the bad unit and continue, because a partially loaded configuration produces a

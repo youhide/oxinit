@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use rustix::system::RebootCommand;
 
 use crate::container::Environment;
+use crate::watchdog::Watchdog;
 
 /// How long the whole shutdown may take before oxinit stops waiting for units
 /// and goes down anyway.
@@ -92,6 +93,12 @@ impl Shutdown {
     pub fn overdue(&self) -> bool {
         self.started.elapsed() > DEADLINE
     }
+
+    /// Until [`Shutdown::overdue`] turns true, and a moment past it: woken
+    /// exactly at the deadline, `overdue` is still false.
+    pub fn remaining(&self) -> Duration {
+        DEADLINE.saturating_sub(self.started.elapsed()) + Duration::from_millis(10)
+    }
 }
 
 /// Flush, seal, and go down. Does not return unless the kernel refuses.
@@ -99,9 +106,17 @@ impl Shutdown {
 /// The order matters and is the whole of it: `sync` first, because a
 /// filesystem that has not been flushed is what makes a reboot lose data;
 /// then remount read-only, so anything still holding a write cannot make more.
-pub fn finalize(action: Action, environment: &Environment) -> rustix::io::Result<()> {
-    if environment.is_container() {
-        exit(action)
+///
+/// The hardware watchdog is let go last, after the filesystems are sealed:
+/// disarmed for a power off or a halt, left running into a reboot. Anything
+/// that hangs before that point is still a hang the watchdog ends.
+pub fn finalize(
+    action: Action,
+    environment: &Environment,
+    watchdog: Option<&mut Watchdog>,
+) -> rustix::io::Result<()> {
+    if environment.exits() {
+        exit(action, environment)
     }
 
     println!("oxinit: syncing");
@@ -114,18 +129,24 @@ pub fn finalize(action: Action, environment: &Environment) -> rustix::io::Result
         eprintln!("oxinit: remount / read-only: {e}");
     }
 
+    if let Some(watchdog) = watchdog {
+        watchdog.release(action);
+    }
+
     println!("oxinit: {action}");
     rustix::system::reboot(action.command())
 }
 
-/// The end of a shutdown in a container.
+/// The end of a shutdown in a container, or of a user manager.
 ///
-/// **The one place oxinit exits, and the reason the rule is written as an
-/// absolute everywhere else.** PID 1 exiting is a kernel panic — on a machine.
-/// In a container it is the entire contract: the container is up for exactly as
-/// long as its PID 1 is, so a supervisor that has stopped every unit and then
-/// stays running is a container that will not stop, and `docker stop` ends it
-/// with `SIGKILL` ten seconds later.
+/// **The one place oxinit exits on purpose, and the reason the rule is
+/// written as an absolute everywhere else.** PID 1 exiting is a kernel panic
+/// — on a machine. In a container it is the entire contract: the container is
+/// up for exactly as long as its PID 1 is, so a supervisor that has stopped
+/// every unit and then stays running is a container that will not stop, and
+/// `docker stop` ends it with `SIGKILL` ten seconds later. A user manager is
+/// not PID 1 of anything, and a stopped one that stayed running would be a
+/// process its session has to kill.
 ///
 /// Reached only from the end of an ordered shutdown, with every unit already
 /// stopped. No error path leads here; a container whose event loop has failed
@@ -133,11 +154,18 @@ pub fn finalize(action: Action, environment: &Environment) -> rustix::io::Result
 /// the whole thing down.
 ///
 /// There is no `sync` and no remount. The filesystems belong to the runtime,
-/// oxinit is not permitted to seal them, and flushing the host's disks from
-/// inside a container is not its call to make.
-fn exit(action: Action) -> ! {
-    let status = action.status();
-    println!("oxinit: {action}: exiting with status {status}");
+/// or to the machine, and neither is a container's or a user's to seal.
+fn exit(action: Action, environment: &Environment) -> ! {
+    // A user manager has no power off or reboot to report, only that it is
+    // done; every signal that stops it asks for the same thing.
+    let status = if environment.is_user() {
+        println!("oxinit: {environment}: everything stopped; exiting");
+        0
+    } else {
+        let status = action.status();
+        println!("oxinit: {action}: exiting with status {status}");
+        status
+    };
 
     std::process::exit(status)
 }

@@ -1,6 +1,7 @@
 //! `oxctl` — the command-line client for oxinit.
 //!
-//! Connects to `/run/oxinit/control.sock`, sends one request, prints one
+//! Connects to `/run/oxinit/control.sock` — or, with `--user`, to the calling
+//! user's own manager under `$XDG_RUNTIME_DIR` — sends one request, prints one
 //! reply, exits. There is no daemon here and no state: the socket is
 //! `SOCK_SEQPACKET`, so a request is one `send` and a reply is one `recv`.
 //!
@@ -9,15 +10,15 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
 
-use oxinit_ipc::{Request, Response, UnitStatus, CONTROL_PATH, MAX_MESSAGE};
+use oxinit_ipc::{Request, Response, UnitStatus, MAX_MESSAGE};
+use oxinit_paths::Paths;
 
 const USAGE: &str = "\
-usage: oxctl <command> [unit]
+usage: oxctl [--user] <command> [unit]
 
 commands:
   list              every unit oxinit knows about
@@ -29,6 +30,9 @@ commands:
   reload            re-read the unit directories
   --version         which build this is
 
+--user talks to your own user manager (oxinit --user) instead of PID 1, and
+`logs` reads from ~/.local/state/oxinit/log.
+
 `logs` reads the file directly. It does not go through oxinit: the control
 socket has to stay responsive, and bulk data is what would stop it being.
 
@@ -36,9 +40,24 @@ oxinit answers immediately. `stop` means the stop was asked for, not that
 it has finished — a unit is not stopped until its cgroup is empty.";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--user` anywhere: it says which manager, not what to ask it.
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let user = args.iter().any(|arg| arg == "--user");
+    args.retain(|arg| arg != "--user");
 
-    match run(&args) {
+    let paths = if user {
+        match Paths::user_from_env() {
+            Ok(paths) => paths,
+            Err(e) => {
+                eprintln!("oxctl: --user: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        Paths::system()
+    };
+
+    match run(&args, &paths) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("oxctl: {message}");
@@ -47,7 +66,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
+fn run(args: &[String], paths: &Paths) -> Result<(), String> {
     let command = args.first().map(String::as_str).unwrap_or("");
     let unit = args.get(1).cloned();
 
@@ -60,7 +79,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // Not a request at all. `oxlogd` writes files and this reads them,
         // because putting a service's whole output through the one socket
         // that has to stay responsive is exactly what would stop it being.
-        ("logs", Some(unit)) => return logs(&unit, tail(args)),
+        ("logs", Some(unit)) => return logs(paths, &unit, tail(args)),
         ("logs", None) => return Err(format!("logs needs a unit name\n\n{USAGE}")),
 
         ("start", Some(unit)) => Request::Start { unit },
@@ -84,7 +103,7 @@ fn run(args: &[String]) -> Result<(), String> {
         (other, _) => return Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
 
-    match exchange(&request)? {
+    match exchange(paths, &request)? {
         Response::Units(units) => {
             print_units(&units, matches!(request, Request::List));
             Ok(())
@@ -110,8 +129,8 @@ fn tail(args: &[String]) -> Option<usize> {
 /// Only the live file. The rotated generations are `<unit>.log.1` and up in
 /// the same directory, and reading them is `cat` — there is no index and no
 /// merge to do, which is most of the reason the format is plain text.
-fn logs(unit: &str, tail: Option<usize>) -> Result<(), String> {
-    let path = oxinit_log::path(Path::new(oxinit_log::LOG_DIR), unit);
+fn logs(paths: &Paths, unit: &str, tail: Option<usize>) -> Result<(), String> {
+    let path = oxinit_log::path(&paths.log_dir, unit);
 
     let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!(
@@ -133,7 +152,7 @@ fn logs(unit: &str, tail: Option<usize>) -> Result<(), String> {
 }
 
 /// One request, one reply.
-fn exchange(request: &Request) -> Result<Response, String> {
+fn exchange(paths: &Paths, request: &Request) -> Result<Response, String> {
     let body = oxinit_ipc::encode(request).map_err(|e| e.to_string())?;
 
     let socket = rustix::net::socket_with(
@@ -144,13 +163,24 @@ fn exchange(request: &Request) -> Result<Response, String> {
     )
     .map_err(|e| format!("socket: {e}"))?;
 
-    let addr = SocketAddrUnix::new(CONTROL_PATH).map_err(|e| format!("{CONTROL_PATH}: {e}"))?;
+    let control = paths.control();
+    let addr = SocketAddrUnix::new(&control).map_err(|e| format!("{}: {e}", control.display()))?;
 
     rustix::net::connect(&socket, &addr).map_err(|e| {
-        format!(
-            "connect {CONTROL_PATH}: {e}\n\
-             is oxinit running as PID 1, and are you root?"
-        )
+        if paths.is_user() {
+            format!(
+                "connect {}: {e}\n\
+                 is your user manager running? It is `oxinit --user`, started \
+                 with your session",
+                control.display()
+            )
+        } else {
+            format!(
+                "connect {}: {e}\n\
+                 is oxinit running as PID 1, and are you root?",
+                control.display()
+            )
+        }
     })?;
 
     rustix::net::send(&socket, &body, SendFlags::empty()).map_err(|e| format!("send: {e}"))?;

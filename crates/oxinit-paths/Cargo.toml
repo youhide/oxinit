@@ -1,0 +1,16 @@
+[package]
+name = "oxinit-paths"
+version.workspace = true
+description = "Where oxinit's sockets and logs are, for the system and for a user"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No dependencies. `oxinit`, `oxctl` and `oxlogd` have to agree on where the
+# sockets are, for the system manager and for each user's, and the way to make
+# them agree is one definition that all three — and the crates whose
+# constants used to be that definition — depend on.
+[dependencies]
+thiserror.workspace = true

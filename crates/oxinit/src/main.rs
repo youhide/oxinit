@@ -46,10 +46,14 @@ mod shutdown;
 mod supervisor;
 mod sys;
 mod timer;
+mod user;
+mod watchdog;
 
 use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::{Child, ExitCode};
+
+use oxinit_paths::Paths;
 
 use crate::error::{Error, Result};
 
@@ -83,16 +87,33 @@ const SIGUSR2: u32 = libc::SIGUSR2 as u32;
 /// it with.
 const SIGPWR: u32 = libc::SIGPWR as u32;
 
+/// Nothing, to PID 1. To a user manager, the session it belonged to has gone:
+/// stop everything and exit.
+const SIGHUP: u32 = libc::SIGHUP as u32;
+
 fn main() -> ExitCode {
-    // Before the pid check, deliberately. `oxinit --version` has to work for
-    // somebody holding a binary and asking what it is, and that person is
-    // exactly the one who cannot run it as PID 1 to find out.
-    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+    let init = rustix::process::getpid().is_init();
+
+    // `oxinit --version` has to work for somebody holding a binary and asking
+    // what it is, who is exactly the one who cannot run it as PID 1 to find
+    // out. Never as PID 1, though: the kernel hands init every command line
+    // word it does not recognise, and a stray `--version` there would return
+    // from `main` — which panics the kernel.
+    if !init && std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("oxinit {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
 
-    if !rustix::process::getpid().is_init() {
+    // A user's manager: the same supervisor, run by a user for their own
+    // services. See `user`. Never as PID 1, whatever argv says: the kernel
+    // hands init every command line word it does not recognise, and a stray
+    // `--user` there must not turn the machine's init into something that
+    // returns from `main`.
+    if !init && std::env::args().skip(1).any(|arg| arg == "--user") {
+        return user::boot();
+    }
+
+    if !init {
         eprintln!(
             "oxinit: running as pid {}, not 1. oxinit is an init system; \
              it is not meant to be run from a shell.",
@@ -159,7 +180,9 @@ fn boot() -> ! {
         }
     };
 
-    let notify = match notify::Notify::bind() {
+    let paths = Paths::system();
+
+    let notify = match notify::Notify::bind(&paths.notify()) {
         Ok(notify) => notify,
         Err(e) => {
             eprintln!("oxinit: {e}");
@@ -170,7 +193,7 @@ fn boot() -> ! {
     // Not fatal. A machine with no control socket still boots and still
     // supervises; it just cannot be asked anything until the next boot, which
     // beats not booting.
-    let mut control = match control::Control::bind() {
+    let mut control = match control::Control::bind(&paths.control()) {
         Ok(control) => Some(control),
         Err(e) => {
             eprintln!("oxinit: {e}");
@@ -194,7 +217,7 @@ fn boot() -> ! {
     // Without a log socket a machine still boots and still supervises. What
     // stops working is `output = "log"`, and it says so against the unit that
     // asked for it rather than as one fatal error here.
-    let logs = match logs::Logs::bind() {
+    let logs = match logs::Logs::bind(&paths.log_socket()) {
         Ok(logs) => logs,
         Err(e) => {
             eprintln!("oxinit: {e}");
@@ -203,38 +226,18 @@ fn boot() -> ! {
         }
     };
 
-    let mut supervisor = supervisor::Supervisor::load(&hostname, timers, notify, cgroups, logs);
+    let mut supervisor = supervisor::Supervisor::load(
+        &hostname,
+        supervisor::UnitSource::system(),
+        timers,
+        notify,
+        cgroups,
+        logs,
+    );
 
-    let registered = events
-        .register(&signals, event::Source::Signals)
-        .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer))
-        .and_then(|()| events.register(supervisor.timers.wall_fd(), event::Source::WallTimer))
-        .and_then(|()| events.register(supervisor.notify.as_fd(), event::Source::Notify));
-
-    if let Some(control) = control.as_ref() {
-        if let Err(e) = events.register(control.as_fd(), event::Source::Control) {
-            eprintln!("oxinit: {e}");
-        }
-    }
-
-    if let Some(fd) = supervisor.logs.listener() {
-        if let Err(e) = events.register(fd, event::Source::LogSocket) {
-            eprintln!("oxinit: {e}");
-        }
-    }
-
-    if let Err(e) = registered {
+    if let Err(e) = wire(&events, &signals, &supervisor, control.as_ref()) {
         eprintln!("oxinit: {e}");
         fallback(Some(&signals));
-    }
-
-    // Every service cgroup, registered once and never touched again. The
-    // hierarchy is built before anything starts precisely so this is one pass
-    // rather than an epoll call on every start and stop.
-    for (id, fd) in supervisor.cgroups.events() {
-        if let Err(e) = events.register_pri(fd, event::Source::Cgroup(id)) {
-            eprintln!("oxinit: {e}");
-        }
     }
 
     // With nothing to supervise, keep the machine usable the way M0 did.
@@ -251,6 +254,17 @@ fn boot() -> ! {
     // eagerly is never activated a second time by a connection.
     supervisor.sync_sockets(&events);
 
+    // Last, so the first write to the device is the loop's own first turn.
+    // A watchdog an initramfs left running keeps counting until then, which
+    // is why nothing slow sits between here and `run`.
+    let mut watchdog = watchdog::Watchdog::configure(&environment);
+    if let Some(watchdog) = watchdog.as_ref() {
+        let known = watchdog
+            .awaiting()
+            .is_none_or(|unit| supervisor.knows(unit));
+        watchdog.check_boot_unit(known);
+    }
+
     run(
         &mut events,
         &signals,
@@ -258,7 +272,50 @@ fn boot() -> ! {
         &mut shell,
         &mut control,
         &environment,
+        &mut watchdog,
     )
+}
+
+/// Register everything the loop watches.
+///
+/// The signalfd, the timers and the notify socket are the loop: failing to
+/// register any of them is returned, and the caller cannot go on. The control
+/// socket, the log socket and the cgroups each cost one feature when they
+/// fail, and say so.
+fn wire(
+    events: &event::EventLoop,
+    signals: &OwnedFd,
+    supervisor: &supervisor::Supervisor,
+    control: Option<&control::Control>,
+) -> Result<()> {
+    events
+        .register(signals, event::Source::Signals)
+        .and_then(|()| events.register(supervisor.timers.as_fd(), event::Source::Timer))
+        .and_then(|()| events.register(supervisor.timers.wall_fd(), event::Source::WallTimer))
+        .and_then(|()| events.register(supervisor.notify.as_fd(), event::Source::Notify))?;
+
+    if let Some(control) = control {
+        if let Err(e) = events.register(control.as_fd(), event::Source::Control) {
+            eprintln!("oxinit: {e}");
+        }
+    }
+
+    if let Some(fd) = supervisor.logs.listener() {
+        if let Err(e) = events.register(fd, event::Source::LogSocket) {
+            eprintln!("oxinit: {e}");
+        }
+    }
+
+    // Every service cgroup, registered once and never touched again. The
+    // hierarchy is built before anything starts precisely so this is one pass
+    // rather than an epoll call on every start and stop.
+    for (id, fd) in supervisor.cgroups.events() {
+        if let Err(e) = events.register_pri(fd, event::Source::Cgroup(id)) {
+            eprintln!("oxinit: {e}");
+        }
+    }
+
+    Ok(())
 }
 
 /// One line for the mounts oxinit did not have to do, one for the ones it was
@@ -301,15 +358,31 @@ fn run(
     shell: &mut Option<Child>,
     control: &mut Option<control::Control>,
     environment: &container::Environment,
+    watchdog: &mut Option<watchdog::Watchdog>,
 ) -> ! {
     let mut sources = Vec::new();
     let mut pending = Vec::new();
 
     loop {
-        if let Err(e) = events.wait(&mut sources) {
+        // Woken for the watchdog even when nothing else happens. With none
+        // configured this sleeps until an event, as it always did.
+        // And for a shutdown's deadline, which no event marks.
+        let timeout = [
+            watchdog.as_ref().and_then(watchdog::Watchdog::wait_bound),
+            supervisor.wait_bound(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+
+        // Falling back stops the watchdog being fed, and that is deliberate:
+        // a PID 1 that cannot run its loop is the hang the watchdog exists
+        // for. A machine that has one configured resets, rather than waiting
+        // on the console for someone who may never come.
+        if let Err(e) = events.wait(&mut sources, timeout) {
             eprintln!("oxinit: {e}");
             // A failing epoll would spin this loop at full speed.
-            fallback(Some(signals));
+            cannot_continue(signals, environment);
         }
 
         for source in &sources {
@@ -319,7 +392,9 @@ fn run(
             // can leave that state stale, which is survivable — the next event
             // corrects it — where letting the panic escape is not.
             let result = catch_unwind(AssertUnwindSafe(|| match source {
-                event::Source::Signals => on_signals(signals, supervisor, shell, &mut pending),
+                event::Source::Signals => {
+                    on_signals(signals, supervisor, shell, &mut pending, environment)
+                }
                 event::Source::Timer => supervisor.on_timer(),
                 event::Source::WallTimer => supervisor.on_wall_timer(),
                 event::Source::Notify => supervisor.on_notify(),
@@ -353,18 +428,34 @@ fn run(
             eprintln!("oxinit: socket reconciliation panicked; continuing");
         }
 
+        // After everything else, so the boot unit's state is this wake-up's.
+        // Here rather than in a handler or as an alarm on the deadline heap:
+        // what feeds the watchdog is the loop coming round, and nothing a
+        // handler does — including panicking — can stand in for that.
+        if let Some(watchdog) = watchdog.as_mut() {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let booted = watchdog
+                    .awaiting()
+                    .is_some_and(|unit| supervisor.reached(unit));
+                watchdog.tick(booted, supervisor.shutting_down());
+            }));
+            if result.is_err() {
+                eprintln!("oxinit: watchdog panicked; continuing");
+            }
+        }
+
         // A shutdown finishes on the same events everything else does: a unit
         // stops, its cgroup empties, and this is where that turns out to have
         // been the last one.
         if let Some(action) = supervisor.settled() {
-            if let Err(e) = shutdown::finalize(action, environment) {
+            if let Err(e) = shutdown::finalize(action, environment, watchdog.as_mut()) {
                 // The kernel refused, and this is a machine — a container
                 // exits inside `finalize` and never reaches here. PID 1
                 // exiting is a kernel panic, so the only option left is to
                 // stay up and say so.
                 eprintln!("oxinit: {action}: {e}");
                 eprintln!("oxinit: cannot go down; staying up with everything stopped");
-                fallback(Some(signals));
+                cannot_continue(signals, environment);
             }
         }
     }
@@ -375,6 +466,7 @@ fn on_signals(
     supervisor: &mut supervisor::Supervisor,
     shell: &mut Option<Child>,
     pending: &mut Vec<u32>,
+    environment: &container::Environment,
 ) {
     if let Err(e) = sys::raw::read_signals(signals, pending).map_err(Error::ReadSignalFd) {
         eprintln!("oxinit: {e}");
@@ -401,6 +493,14 @@ fn on_signals(
                 }
 
                 supervisor.on_sigchld();
+            }
+
+            // A user manager has nothing to power off, reboot or halt. Every
+            // signal that would ask a machine to go down asks it to stop its
+            // units and exit, and so does the hangup of the session it was
+            // started from.
+            SIGTERM | SIGINT | SIGPWR | SIGUSR1 | SIGHUP if environment.is_user() => {
+                supervisor.begin_shutdown(shutdown::Action::PowerOff)
             }
 
             SIGTERM | SIGPWR => supervisor.begin_shutdown(shutdown::Action::PowerOff),
@@ -510,6 +610,15 @@ fn on_shipper_gone(supervisor: &mut supervisor::Supervisor, events: &event::Even
 fn open_signalfd() -> Result<OwnedFd> {
     sys::raw::block_all_signals().map_err(Error::BlockSignals)?;
     sys::raw::signalfd_all().map_err(Error::SignalFd)
+}
+
+/// The loop cannot go on. PID 1 falls back to a console shell; a user manager
+/// is not PID 1, and exits.
+fn cannot_continue(signals: &OwnedFd, environment: &container::Environment) -> ! {
+    if environment.is_user() {
+        user::give_up()
+    }
+    fallback(Some(signals))
 }
 
 /// Last resort. The loop cannot continue, so give an operator a shell and keep

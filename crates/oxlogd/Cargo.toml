@@ -18,4 +18,5 @@ publish.workspace = true
 # place.
 [dependencies]
 oxinit-log = { path = "../oxinit-log" }
+oxinit-paths = { path = "../oxinit-paths" }
 rustix = { workspace = true, features = ["event", "fs", "net"] }

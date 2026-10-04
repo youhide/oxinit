@@ -68,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "oxinit-ipc",
  "oxinit-log",
+ "oxinit-paths",
  "rustix",
 ]
 
@@ -80,10 +81,12 @@ dependencies = [
  "oxinit-graph",
  "oxinit-ipc",
  "oxinit-log",
+ "oxinit-paths",
  "oxinit-service",
  "oxinit-timer",
  "oxinit-unit",
  "oxinit-user",
+ "oxinit-watchdog",
  "rustix",
  "thiserror",
 ]
@@ -108,6 +111,7 @@ dependencies = [
 name = "oxinit-ipc"
 version = "0.1.0"
 dependencies = [
+ "oxinit-paths",
  "serde",
  "serde_json",
 ]
@@ -115,6 +119,16 @@ dependencies = [
 [[package]]
 name = "oxinit-log"
 version = "0.1.0"
+dependencies = [
+ "oxinit-paths",
+]
+
+[[package]]
+name = "oxinit-paths"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "oxinit-service"
@@ -145,10 +159,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxinit-watchdog"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "oxinit-unit",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "oxlogd"
 version = "0.1.0"
 dependencies = [
  "oxinit-log",
+ "oxinit-paths",
  "rustix",
 ]
 

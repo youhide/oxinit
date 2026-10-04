@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 /// Where oxinit listens. Mode `0600`, owned by root, in a root-owned
 /// directory: access to this socket is full control of the machine, and the
 /// mode is the whole authorization story.
-pub const CONTROL_PATH: &str = "/run/oxinit/control.sock";
+///
+/// The system manager's. A user manager's is under that user's
+/// `$XDG_RUNTIME_DIR`; `oxinit-paths` has both.
+pub const CONTROL_PATH: &str = oxinit_paths::system::CONTROL;
 
 /// The largest message either side will send or accept.
 ///

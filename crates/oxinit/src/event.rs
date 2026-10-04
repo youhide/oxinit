@@ -4,8 +4,10 @@
 //! is where multiplexing starts. Still one thread, still no async runtime.
 
 use std::os::fd::{AsFd, OwnedFd};
+use std::time::Duration;
 
 use rustix::event::epoll;
+use rustix::time::Timespec;
 
 use crate::error::{Error, Result};
 
@@ -146,18 +148,28 @@ impl EventLoop {
         .map_err(Error::Epoll)
     }
 
-    /// Block until something is ready, then report what.
+    /// Block until something is ready, or until `timeout` passes, then
+    /// report what. A timeout that passes reports nothing.
+    ///
+    /// The timeout exists for the hardware watchdog, which is fed from the
+    /// loop itself rather than from an alarm on the deadline heap. Everything
+    /// else that is time-based arrives as a timerfd event and needs none.
     ///
     /// `EINTR` cannot happen here — every signal is blocked — but it is
     /// handled rather than assumed away.
-    pub fn wait(&mut self, out: &mut Vec<Source>) -> Result<()> {
+    pub fn wait(&mut self, out: &mut Vec<Source>, timeout: Option<Duration>) -> Result<()> {
         out.clear();
         self.events.clear();
+
+        let timeout = timeout.map(|timeout| Timespec {
+            tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(timeout.subsec_nanos()),
+        });
 
         match epoll::wait(
             &self.epoll,
             rustix::buffer::spare_capacity(&mut self.events),
-            None,
+            timeout.as_ref(),
         ) {
             Ok(_) => {}
             Err(rustix::io::Errno::INTR) => return Ok(()),

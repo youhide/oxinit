@@ -40,6 +40,7 @@ wants       = [
     "poke",
     "knock-socket",
     "knocker",
+    "user-manager",
     "absent",
 ]
 after       = ["console", "banner", "logged"]

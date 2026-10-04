@@ -25,7 +25,7 @@ use std::fmt;
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-use oxinit_unit::{Restart, Unit};
+use oxinit_unit::{Restart, ServiceType, Unit};
 
 /// Backoff never grows past this, or a service that fails once a week ends up
 /// taking hours to come back.
@@ -120,6 +120,14 @@ pub struct Instance {
     stop_cause: Option<StopCause>,
     /// Whether the stop timeout expired and `cgroup.kill` was used.
     killed: bool,
+    /// Whether the unit has ever come up: become `Active`, or — a `oneshot`,
+    /// which never does — run to a clean exit. Never cleared.
+    ///
+    /// What the hardware watchdog's boot deadline waits for. A boot is
+    /// confirmed by a unit having *got there*, so a unit that came up and
+    /// later stopped still confirmed it, and a `oneshot` that has finished
+    /// its job is the commonest way to say so.
+    pub reached: bool,
 }
 
 impl Instance {
@@ -139,6 +147,7 @@ impl Instance {
             last_ping: None,
             stop_cause: None,
             killed: false,
+            reached: false,
         }
     }
 
@@ -170,6 +179,7 @@ impl Instance {
     }
 
     pub fn entered_active(&mut self) {
+        self.reached = true;
         self.state = State::Active;
         self.active_since = Some(Instant::now());
         self.last_ping = Some(Instant::now());
@@ -261,6 +271,15 @@ impl Instance {
         // the transition, and the cgroup emptying is what triggers it.
         if self.state == State::Deactivating {
             return None;
+        }
+
+        // A `oneshot`'s readiness condition: it never becomes `Active`.
+        let oneshot = self
+            .unit
+            .service()
+            .is_some_and(|s| s.ty == ServiceType::Oneshot);
+        if oneshot && self.state == State::Activating && exit == Exit::Clean {
+            self.reached = true;
         }
 
         self.schedule_restart(exit)
@@ -501,6 +520,59 @@ mod tests {
         instance.entered_deactivating(StopCause::Requested);
         instance.deactivated();
         assert_eq!(instance.state, State::Inactive);
+    }
+
+    fn oneshot() -> Unit {
+        oxinit_unit::parse(
+            "job",
+            "[service]\ntype = \"oneshot\"\nexec = \"/bin/true\"\n",
+            "host",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_unit_that_became_active_has_reached_its_goal_for_good() {
+        let mut instance = Instance::new(unit("no", "1s"));
+        assert!(!instance.reached);
+
+        instance.entered_active();
+        assert!(instance.reached);
+
+        instance.on_exit(Exit::Code(1));
+        assert_eq!(instance.state, State::Failed);
+        assert!(instance.reached, "came up, then failed: it still came up");
+    }
+
+    #[test]
+    fn a_oneshot_reaches_its_goal_by_exiting_cleanly() {
+        let mut instance = Instance::new(oneshot());
+        instance.state = State::Activating;
+        instance.on_exit(Exit::Clean);
+        assert_eq!(instance.state, State::Inactive);
+        assert!(instance.reached);
+    }
+
+    #[test]
+    fn a_oneshot_that_fails_has_not_reached_it() {
+        let mut instance = Instance::new(oneshot());
+        instance.state = State::Activating;
+        instance.on_exit(Exit::Code(1));
+        assert!(!instance.reached);
+    }
+
+    #[test]
+    fn a_service_exiting_cleanly_before_it_was_ready_has_not_reached_it() {
+        let notify = oxinit_unit::parse(
+            "n",
+            "[service]\ntype = \"notify\"\nexec = \"/bin/true\"\n",
+            "host",
+        )
+        .unwrap();
+        let mut instance = Instance::new(notify);
+        instance.state = State::Activating;
+        instance.on_exit(Exit::Clean);
+        assert!(!instance.reached);
     }
 
     #[test]

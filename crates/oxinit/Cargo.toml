@@ -16,9 +16,11 @@ oxinit-cgroup = { path = "../oxinit-cgroup" }
 oxinit-graph = { path = "../oxinit-graph" }
 oxinit-ipc = { path = "../oxinit-ipc" }
 oxinit-log = { path = "../oxinit-log" }
+oxinit-paths = { path = "../oxinit-paths" }
 oxinit-service = { path = "../oxinit-service" }
 oxinit-timer = { path = "../oxinit-timer" }
 oxinit-unit = { path = "../oxinit-unit" }
 oxinit-user = { path = "../oxinit-user" }
+oxinit-watchdog = { path = "../oxinit-watchdog" }
 rustix = { workspace = true, features = ["event", "fs", "mount", "net", "pipe", "process", "stdio", "system", "termios", "time"] }
 thiserror.workspace = true

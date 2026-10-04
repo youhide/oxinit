@@ -1,0 +1,8 @@
+# The runtime directory a login session would have given `nobody`. A test
+# image has no PAM and no elogind to make it, so this does.
+[unit]
+description = "A runtime directory for nobody"
+
+[service]
+type = "oneshot"
+exec = '/bin/sh -c "/bin/mkdir -p /run/user/65534 && /bin/chown 65534:65534 /run/user/65534 && /bin/chmod 0700 /run/user/65534"'

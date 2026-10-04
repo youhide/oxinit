@@ -102,6 +102,7 @@ fn main() {
         "demo" => demo(&rest),
         "test-demo" => test_demo(&rest),
         "test-distro" => test_distro(&rest),
+        "test-watchdog" => test_watchdog(&rest),
         "fetch" => fetch(&rest),
         "" | "help" | "--help" | "-h" => {
             usage();
@@ -129,6 +130,9 @@ commands:
   test-demo  build the demo image and check every claim the README makes
   test-distro
              boot a real distribution userspace and assert on the serial log
+  test-watchdog
+             boot with QEMU's i6300esb: fed until a halt that disarms it,
+             then a boot that never confirms itself and is reset
   fetch      download the kernel and busybox a boot needs, into target/
 
 options:
@@ -340,6 +344,22 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("reloaded", "M5: oxctl reload, which no boot had ever run"),
     (
+        "oxinit: the user manager for nobody, units from",
+        "M18: a user manager started, for the user it runs as",
+    ),
+    (
+        "oxinit-user: nobody is nobody",
+        "M18: a user unit ran as the manager's user, and %u is that user",
+    ),
+    (
+        "oxinit: user-probe is ready",
+        "M18: sd_notify reached the user manager's own socket",
+    ),
+    (
+        "oxinit: the user manager for nobody: everything stopped; exiting",
+        "M18: a user manager stops its units and exits when asked to",
+    ),
+    (
         "lingers stopped; not restarting, the machine is going down",
         "M16: a stop that completes mid-shutdown does not take the restart \
          policy, which used to hang PID 1 until the whole-shutdown deadline",
@@ -364,11 +384,18 @@ const EXPECTED: &[(&str, &str)] = &[
 /// only thing that distinguishes `after` gating a start from `after` merely
 /// deciding what order starts were issued in. Both lines are present either
 /// way; only the sequence says the waiting happened.
-const SEQUENCE: &[(&str, &str, &str)] = &[(
-    "oxinit: slow did not start in time",
-    "oxinit-m11: patient started",
-    "M11: `after` waits for activation to finish, not just for a start to be issued",
-)];
+const SEQUENCE: &[(&str, &str, &str)] = &[
+    (
+        "oxinit: slow did not start in time",
+        "oxinit-m11: patient started",
+        "M11: `after` waits for activation to finish, not just for a start to be issued",
+    ),
+    (
+        "oxinit: the user manager for nobody: everything stopped; exiting",
+        "oxinit: syncing",
+        "M18: the user manager is gone before the machine goes down",
+    ),
+];
 
 /// Lines that must not appear. A boot that logs one of these has failed even
 /// if everything else is present.
@@ -455,7 +482,10 @@ fn test_boot(arch: Arch, args: &[String]) -> Result<(), String> {
             "-serial".as_ref(),
             format!("file:{}", log.display()).as_ref(),
             "-append".as_ref(),
-            format!("console={}", arch.console).as_ref(),
+            // `--version` and `-V`: words the kernel does not know, so it
+            // hands them to init, which must boot rather than print its
+            // version and return — a regression test, by being there.
+            format!("console={} --version -V", arch.console).as_ref(),
             "-m".as_ref(),
             "512".as_ref(),
         ])
@@ -801,6 +831,7 @@ cp -a /overlay/init /rootfs/init
 cp -a /overlay/bin/. /rootfs/bin/
 mkdir -p /rootfs/etc/oxinit
 cp -a /overlay/etc/oxinit/units /rootfs/etc/oxinit/
+cp -a /overlay/etc/oxinit/user-units /rootfs/etc/oxinit/
 
 # The one group the privilege-drop unit needs, added rather than substituted.
 echo 'oxinit:x:900:nobody' >> /rootfs/etc/group
@@ -827,6 +858,331 @@ cd /rootfs
 find . | cpio --quiet -o -H newc | gzip -9 > "/out/$1"
 echo "build.sh: packed $(find . | wc -l) paths from $(cat /etc/alpine-release)"
 "#;
+
+/// A kernel with a hardware watchdog driver, and the driver.
+///
+/// The netboot kernel `fetch` downloads has the watchdog core built in and
+/// every driver as a module, and nothing in a hand-assembled initramfs can
+/// load a module it does not have. Alpine's `linux-virt` package carries a
+/// kernel and its modules together, so the two always match — which a module
+/// from the package next to the netboot kernel would not, because the
+/// package moves with point releases and the netboot image does not.
+///
+/// Extracted inside the distribution's own image, like `test-distro`'s root,
+/// and cached under `target/`.
+const WATCHDOG_KERNEL_SCRIPT: &str = r#"#!/bin/sh
+# Written by `cargo xtask test-watchdog`. Runs inside the distribution's image.
+set -e
+apk add --no-cache linux-virt >/dev/null
+cp /boot/vmlinuz-virt /out/vmlinuz-virt-x86_64
+module=$(find /lib/modules -name 'i6300esb.ko*' | head -n 1)
+case "$module" in
+    *.gz) gunzip -c "$module" > /out/i6300esb-x86_64.ko ;;
+    *) cp "$module" /out/i6300esb-x86_64.ko ;;
+esac
+echo "build.sh: $(ls /lib/modules) with $(basename "$module")"
+"#;
+
+fn watchdog_kernel(engine: &str) -> Result<(PathBuf, PathBuf), String> {
+    let target = root().join("target");
+    let kernel = target.join("vmlinuz-virt-x86_64");
+    let module = target.join("i6300esb-x86_64.ko");
+    if kernel.exists() && module.exists() {
+        return Ok((kernel, module));
+    }
+
+    let script = target.join("oxinit-watchdog-kernel.sh");
+    fs::write(&script, WATCHDOG_KERNEL_SCRIPT)
+        .map_err(|e| format!("write {}: {e}", script.display()))?;
+
+    println!("xtask: fetching linux-virt from {DISTRO_IMAGE} with {engine}");
+    // The platform is named because the tag alone resolves to whatever was
+    // pulled last, and an aarch64 kernel boots nothing here.
+    run(Command::new(engine).args([
+        "run".as_ref(),
+        "--rm".as_ref(),
+        "--platform".as_ref(),
+        "linux/amd64".as_ref(),
+        "-v".as_ref(),
+        format!("{}:/build.sh:ro", script.display()).as_ref(),
+        "-v".as_ref(),
+        format!("{}:/out", target.display()).as_ref(),
+        std::ffi::OsStr::new(DISTRO_IMAGE),
+        "/bin/sh".as_ref(),
+        "/build.sh".as_ref(),
+    ]))?;
+
+    Ok((kernel, module))
+}
+
+/// One boot of the watchdog test.
+struct WatchdogCase {
+    name: &'static str,
+    /// `/etc/oxinit/watchdog.toml`.
+    config: &'static str,
+    /// Appended to the kernel command line.
+    cmdline: &'static str,
+    /// What the boot unit runs. `/bin/true` confirms the boot; `/bin/false`
+    /// is a boot unit that fails, so the boot is never confirmed.
+    confirm: &'static str,
+    /// The signal that ends the boot, `seconds` after the boot unit.
+    end: (&'static str, u32),
+    expected: &'static [(&'static str, &'static str)],
+    forbidden: &'static [&'static str],
+    /// What QEMU has to do for the case to pass.
+    outcome: Outcome,
+}
+
+#[derive(Clone, Copy)]
+enum Outcome {
+    /// Still running this many seconds after this line reached the log. A
+    /// watchdog left armed would have reset it — and `-no-reboot` turns a
+    /// reset into QEMU exiting.
+    StaysUpAfter(&'static str, u64),
+    /// Exits on its own: the watchdog reset it.
+    Resets,
+}
+
+/// Every case uses a 4 s hardware timeout: short, so a reset that should not
+/// happen happens inside the test, and one that should does not take long.
+const WATCHDOG_CASES: &[WatchdogCase] = &[
+    WatchdogCase {
+        name: "fed",
+        config: "timeout-sec = \"4s\"\nboot-unit = \"confirm\"\nboot-sec = \"1min\"\n",
+        cmdline: "",
+        confirm: "/bin/true",
+        // Three timeouts and more of being fed, then a halt.
+        end: ("USR1", 14),
+        expected: &[
+            (
+                "oxinit: watchdog: /dev/watchdog0, 4 s timeout; the boot has 60 s to reach confirm",
+                "the configuration was read from /etc",
+            ),
+            (
+                "looking again as it may yet appear",
+                "a device whose driver is a module is waited for, not given up on",
+            ),
+            (
+                "oxinit: watchdog: feeding /dev/watchdog0, 4 s timeout",
+                "the device opened once its driver loaded, with the timeout asked for",
+            ),
+            (
+                "oxinit: watchdog: the boot is confirmed",
+                "a oneshot that ran to a clean exit confirms the boot",
+            ),
+            (
+                "oxinit: watchdog: stopped",
+                "a halt disarms the watchdog with the magic close",
+            ),
+            (
+                "oxinit: halt",
+                "the halt itself, after fourteen fed seconds",
+            ),
+        ],
+        forbidden: &["did not reach", "panicked", "Kernel panic"],
+        outcome: Outcome::StaysUpAfter("oxinit: halt", 12),
+    },
+    WatchdogCase {
+        name: "overdue",
+        config: "timeout-sec = \"4s\"\nboot-unit = \"confirm\"\nboot-sec = \"5min\"\n",
+        cmdline: "oxinit.watchdog.boot-sec=8s",
+        confirm: "/bin/false",
+        end: ("TERM", 60),
+        expected: &[
+            (
+                "the boot has 8 s to reach confirm",
+                "the kernel command line overrode the file's boot-sec",
+            ),
+            (
+                "oxinit: watchdog: feeding /dev/watchdog0, 4 s timeout",
+                "the device was fed while the deadline ran",
+            ),
+            (
+                "oxinit: watchdog: the boot did not reach confirm within 8 s",
+                "a boot unit that failed never confirms the boot",
+            ),
+        ],
+        forbidden: &[
+            "the boot is confirmed",
+            "oxinit: syncing",
+            "oxinit: power off",
+            "panicked",
+            "Kernel panic",
+        ],
+        outcome: Outcome::Resets,
+    },
+];
+
+/// Boot oxinit with a hardware watchdog under QEMU, twice: once fed until a
+/// halt that has to disarm it, once with a boot that never confirms itself
+/// and has to be reset.
+///
+/// x86_64 only. The watchdog is QEMU's i6300esb, a PC chipset device; the
+/// aarch64 `virt` board has no watchdog the kernel drives this way.
+fn test_watchdog(args: &[String]) -> Result<(), String> {
+    let arch = find_arch(args)?;
+    if arch.name != "x86_64" {
+        return Err("test-watchdog is x86_64 only: its watchdog is QEMU's i6300esb".to_owned());
+    }
+    let engine = flag(args, "--engine")?.unwrap_or("docker").to_owned();
+    let shell = find_shell(arch, args)?
+        .ok_or("test-watchdog needs busybox: run `cargo xtask fetch` or pass --shell PATH")?;
+
+    let (kernel, module) = watchdog_kernel(&engine)?;
+    let binary = build(arch)?;
+
+    let mut failures = Vec::new();
+    for case in WATCHDOG_CASES {
+        println!("\nxtask: === watchdog: {} ===", case.name);
+        if let Err(e) = watchdog_case(arch, case, &kernel, &module, &binary, &shell) {
+            failures.push(format!("{}: {e}", case.name));
+        }
+    }
+
+    if failures.is_empty() {
+        println!("\nxtask: the watchdog was fed, released, and starved as configured");
+        return Ok(());
+    }
+    Err(failures.join("\n"))
+}
+
+fn watchdog_case(
+    arch: Arch,
+    case: &WatchdogCase,
+    kernel: &Path,
+    module: &Path,
+    binary: &Path,
+    shell: &Path,
+) -> Result<(), String> {
+    // No unit directory of its own: every unit is written below, because
+    // these four are the whole of what the case is about.
+    let staging = stage_units(arch, binary, Some(shell), false, "watchdog")?;
+
+    let link = staging.join("bin/insmod");
+    let _ = fs::remove_file(&link);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("busybox", &link)
+        .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+    fs::copy(module, staging.join("i6300esb.ko")).map_err(|e| format!("copy module: {e}"))?;
+
+    let etc = staging.join("etc/oxinit");
+    let units = etc.join("units");
+    fs::create_dir_all(&units).map_err(|e| format!("create {}: {e}", units.display()))?;
+    fs::write(etc.join("watchdog.toml"), case.config)
+        .map_err(|e| format!("write watchdog.toml: {e}"))?;
+
+    let (signal, after) = case.end;
+    let files = [
+        (
+            "default.toml",
+            "[unit]\nwants = [\"load-watchdog\", \"confirm\", \"end\"]\n\n[target]\n".to_owned(),
+        ),
+        // Loaded by a unit rather than present at boot, which is what a
+        // module from a distribution's udev looks like to oxinit: a device
+        // that turns up a few seconds in.
+        (
+            "load-watchdog.toml",
+            "[service]\ntype = \"oneshot\"\nexec = \"/bin/insmod /i6300esb.ko\"\n".to_owned(),
+        ),
+        (
+            "confirm.toml",
+            format!(
+                "[unit]\nafter = [\"load-watchdog\"]\n\n\
+                 [service]\ntype = \"oneshot\"\nexec = \"{}\"\n",
+                case.confirm
+            ),
+        ),
+        (
+            "end.toml",
+            format!(
+                "[unit]\nafter = [\"confirm\"]\n\n\
+                 [service]\nexec = '/bin/sh -c \"/bin/sleep {after}; /bin/kill -{signal} 1\"'\n"
+            ),
+        ),
+    ];
+    for (name, text) in files {
+        fs::write(units.join(name), text).map_err(|e| format!("write {name}: {e}"))?;
+    }
+
+    let image = root().join(format!("target/oxinit-watchdog-{}.cpio.gz", case.name));
+    let script = format!(
+        "cd {} && find . | cpio --quiet -o -H newc | gzip -9 > {}",
+        shell_quote(&staging),
+        shell_quote(&image),
+    );
+    run(Command::new("sh").arg("-c").arg(script))?;
+
+    let log = root().join(format!("target/test-watchdog-{}.log", case.name));
+    let _ = fs::remove_file(&log);
+
+    // `-no-reboot` turns the watchdog's reset into QEMU exiting, which is
+    // what makes a reset observable at all.
+    let mut child = Command::new(arch.qemu)
+        .args(arch.machine)
+        .args([
+            "-kernel".as_ref(),
+            kernel.as_os_str(),
+            "-initrd".as_ref(),
+            image.as_os_str(),
+            "-device".as_ref(),
+            "i6300esb".as_ref(),
+            "-no-reboot".as_ref(),
+            "-display".as_ref(),
+            "none".as_ref(),
+            "-serial".as_ref(),
+            format!("file:{}", log.display()).as_ref(),
+            "-append".as_ref(),
+            format!("console={} {}", arch.console, case.cmdline).as_ref(),
+            "-m".as_ref(),
+            "512".as_ref(),
+        ])
+        .spawn()
+        .map_err(|e| format!("run {}: {e}", arch.qemu))?;
+
+    let read_log = || fs::read_to_string(&log).unwrap_or_default();
+    let mut failures = Vec::new();
+
+    match case.outcome {
+        Outcome::Resets => {
+            if !wait_for(&mut child, arch.timeout)? {
+                failures.push(format!(
+                    "qemu was still running after {}s: nothing reset it",
+                    arch.timeout
+                ));
+            }
+        }
+        Outcome::StaysUpAfter(line, seconds) => {
+            let mut seen = false;
+            for _ in 0..arch.timeout * 10 {
+                if read_log().contains(line) {
+                    seen = true;
+                    break;
+                }
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            if seen {
+                std::thread::sleep(std::time::Duration::from_secs(seconds));
+                match child.try_wait() {
+                    Ok(None) => println!("  ok    still up {seconds}s after `{line}`"),
+                    _ => failures.push(format!(
+                        "qemu exited within {seconds}s of `{line}`: the watchdog was still armed"
+                    )),
+                }
+            } else {
+                failures.push(format!("`{line}` never appeared, or qemu exited first"));
+            }
+
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    check(&read_log(), case.expected, case.forbidden, &[], failures)
+}
 
 /// What a container log must contain, and what each line proves.
 ///
@@ -1420,6 +1776,29 @@ fn stage_units(
         }
         println!("xtask: installed {count} units from {units}/");
 
+        // A user manager's units, from `<units>/user/`, where the user
+        // manager in the same set looks for them.
+        let user_src = units_src.join("user");
+        if user_src.is_dir() {
+            let user_dst = staging.join("etc/oxinit/user-units");
+            fs::create_dir_all(&user_dst)
+                .map_err(|e| format!("create {}: {e}", user_dst.display()))?;
+            let mut count = 0;
+            for entry in
+                fs::read_dir(&user_src).map_err(|e| format!("read {}: {e}", user_src.display()))?
+            {
+                let path = entry.map_err(|e| format!("read entry: {e}"))?.path();
+                if path.extension().is_some_and(|ext| ext == "toml") {
+                    if let Some(name) = path.file_name() {
+                        fs::copy(&path, user_dst.join(name))
+                            .map_err(|e| format!("copy {}: {e}", path.display()))?;
+                        count += 1;
+                    }
+                }
+            }
+            println!("xtask: installed {count} user units from {units}/user/");
+        }
+
         if test {
             install_test_shutdown(&units_dst)?;
         }
@@ -1433,7 +1812,7 @@ fn stage_units(
 /// not exist and the shell can only run its own builtins.
 const APPLETS: &[&str] = &[
     "cat", "ls", "ps", "sleep", "mount", "umount", "hostname", "grep", "poweroff", "reboot",
-    "dmesg", "kill", "mkdir", "echo", "true", "false", "date", "id", "sed", "wc",
+    "dmesg", "kill", "mkdir", "echo", "true", "false", "date", "id", "sed", "wc", "chown", "chmod",
 ];
 
 /// Whether to treat this binary as busybox, by filename.

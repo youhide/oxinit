@@ -1,8 +1,10 @@
-//! Whether oxinit booted a machine or was handed a container.
+//! Whether oxinit booted a machine, was handed a container, or is a user's
+//! manager.
 //!
 //! One thing changes as a direct consequence: on a machine the end of a
 //! shutdown is `reboot(2)`, and in a container it is exiting, because the
-//! machine is not oxinit's to reboot. See [`crate::shutdown`].
+//! machine is not oxinit's to reboot. A user manager is not PID 1 of anything
+//! and exits the same way. See [`crate::shutdown`].
 //!
 //! Nothing else keys off this. The console and the mounts each decide on their
 //! own local evidence — whether stdio is already usable, whether a filesystem
@@ -20,6 +22,9 @@ pub enum Environment {
     Machine,
     /// PID 1 of a container, as named by whatever evidence found it.
     Container(Runtime),
+    /// `oxinit --user`, for the user named here. Not detected: asked for on
+    /// the command line, by whatever started it.
+    User(String),
 }
 
 impl Environment {
@@ -37,6 +42,15 @@ impl Environment {
     pub fn is_container(&self) -> bool {
         matches!(self, Environment::Container(_))
     }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self, Environment::User(_))
+    }
+
+    /// Whether a shutdown ends by exiting rather than by `reboot(2)`.
+    pub fn exits(&self) -> bool {
+        !matches!(self, Environment::Machine)
+    }
 }
 
 impl fmt::Display for Environment {
@@ -44,6 +58,7 @@ impl fmt::Display for Environment {
         match self {
             Environment::Machine => f.write_str("a machine"),
             Environment::Container(runtime) => write!(f, "a container ({runtime})"),
+            Environment::User(name) => write!(f, "the user manager for {name}"),
         }
     }
 }

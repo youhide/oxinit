@@ -9,13 +9,36 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::UnitError;
-use crate::unit::{self, Unit};
+use crate::unit::{self, Scope, Unit};
 
 /// Packaged units. Lowest precedence.
 pub const VENDOR_DIR: &str = "/usr/lib/oxinit/units";
 
 /// Operator units. Replaces a vendor file of the same name.
 pub const ETC_DIR: &str = "/etc/oxinit/units";
+
+/// Packaged units for every user's manager. Lowest precedence.
+pub const USER_VENDOR_DIR: &str = "/usr/lib/oxinit/user-units";
+
+/// The operator's units for every user's manager.
+pub const USER_ETC_DIR: &str = "/etc/oxinit/user-units";
+
+/// A user's own units, under their `$XDG_CONFIG_HOME`. Highest precedence:
+/// the user is the operator of their own manager.
+pub const USER_CONFIG_SUBDIR: &str = "oxinit/user-units";
+
+/// A user manager's unit directories, lowest precedence first.
+///
+/// Three rather than two because a user manager has two operators: the
+/// machine's, in `/etc`, and the user, in their own configuration. Each
+/// replaces a file of the same name wholly, as `/etc` does for the system.
+pub fn user_dirs(config_home: &Path) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(USER_VENDOR_DIR),
+        PathBuf::from(USER_ETC_DIR),
+        config_home.join(USER_CONFIG_SUBDIR),
+    ]
+}
 
 /// Units found on disk, plus whatever went wrong finding them.
 #[derive(Debug, Default)]
@@ -36,13 +59,18 @@ pub fn load_default(hostname: &str) -> Loaded {
 /// A missing directory is not an error: a machine with no `/etc/oxinit/units`
 /// is a machine with no operator overrides.
 pub fn load_dirs(dirs: &[&Path], hostname: &str) -> Loaded {
+    load_dirs_in(dirs, hostname, &Scope::System)
+}
+
+/// As [`load_dirs`], for the manager `scope` says.
+pub fn load_dirs_in(dirs: &[&Path], hostname: &str, scope: &Scope) -> Loaded {
     let mut loaded = Loaded::default();
 
     for dir in dirs {
         match unit_files(dir) {
             Ok(files) => {
                 for (name, path) in files {
-                    match read_and_parse(&name, &path, hostname) {
+                    match read_and_parse(&name, &path, hostname, scope) {
                         // Replaces any unit of the same name from an earlier
                         // directory, wholly.
                         Ok(unit) => {
@@ -81,13 +109,18 @@ fn unit_files(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     Ok(found)
 }
 
-fn read_and_parse(name: &str, path: &Path, hostname: &str) -> Result<Unit, UnitError> {
+fn read_and_parse(
+    name: &str,
+    path: &Path,
+    hostname: &str,
+    scope: &Scope,
+) -> Result<Unit, UnitError> {
     let text = std::fs::read_to_string(path).map_err(|source| UnitError::Read {
         path: path.display().to_string(),
         message: source.to_string(),
     })?;
 
-    unit::parse(name, &text, hostname)
+    unit::parse_in(name, &text, hostname, scope)
 }
 
 #[cfg(test)]
@@ -182,6 +215,59 @@ mod tests {
         let loaded = load_dirs(&[&dir.0], "h");
         assert_eq!(loaded.units.len(), 1);
         assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_user_manager_reads_three_directories_in_order() {
+        let dirs = user_dirs(Path::new("/home/ana/.config"));
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/usr/lib/oxinit/user-units"),
+                PathBuf::from("/etc/oxinit/user-units"),
+                PathBuf::from("/home/ana/.config/oxinit/user-units"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_users_own_unit_replaces_the_machines() {
+        let vendor = TempDir::new("uvendor");
+        let user = TempDir::new("uconfig");
+        vendor.write("pipewire.toml", "[service]\nexec = \"/usr/bin/pipewire\"\n");
+        user.write(
+            "pipewire.toml",
+            "[service]\nexec = \"/home/ana/bin/pipewire\"\n",
+        );
+
+        let scope = Scope::User {
+            name: "ana".to_owned(),
+        };
+        let loaded = load_dirs_in(&[&vendor.0, &user.0], "h", &scope);
+        let unit = loaded.units.get("pipewire").unwrap();
+        assert_eq!(unit.service().unwrap().exec, ["/home/ana/bin/pipewire"]);
+        assert_eq!(unit.service().unwrap().user, "ana");
+    }
+
+    #[test]
+    fn a_system_unit_in_a_user_directory_is_reported() {
+        let dir = TempDir::new("usys");
+        dir.write(
+            "sshd.toml",
+            "[service]\nexec = \"/usr/bin/sshd\"\nuser = \"root\"\n",
+        );
+
+        let scope = Scope::User {
+            name: "ana".to_owned(),
+        };
+        let loaded = load_dirs_in(&[&dir.0], "h", &scope);
+        assert!(loaded.units.is_empty());
+        assert_eq!(
+            loaded.errors,
+            [UnitError::UserInUserUnit {
+                unit: "sshd".to_owned()
+            }]
+        );
     }
 
     #[test]
