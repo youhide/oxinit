@@ -92,7 +92,7 @@ pub fn read_signals(fd: &OwnedFd, out: &mut Vec<u32>) -> Result<(), Errno> {
     let n = rustix::io::read(fd, buf.as_mut_slice())?;
 
     out.clear();
-    for record in buf.get(..n).unwrap_or(&[]).chunks_exact(SIGINFO_SIZE) {
+    for record in buf.get(..n).unwrap_or(&[]).as_chunks::<SIGINFO_SIZE>().0 {
         if let Some(signo) = record.get(..4).and_then(|b| b.try_into().ok()) {
             out.push(u32::from_ne_bytes(signo));
         }
