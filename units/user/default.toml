@@ -1,0 +1,6 @@
+# A user manager starts its `default`, as PID 1 does.
+[target]
+
+[unit]
+description = "nobody's default"
+wants       = ["greet", "user-probe"]

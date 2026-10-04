@@ -19,6 +19,8 @@ crates/oxinit-graph/   dependency resolution
 crates/oxinit-service/ service state machine and restart policy
 crates/oxinit-cgroup/  cgroup v2
 crates/oxinit-ipc/     control protocol types
+crates/oxinit-paths/   where the sockets and logs are, system and user
+crates/oxinit-watchdog/ hardware watchdog configuration and policy
 crates/xtask/          build and boot automation
 docs/                  specifications
 units/                 the test image's unit files
@@ -63,6 +65,11 @@ of an ordered shutdown in a container, in `shutdown::exit`, where the container
 only exists for as long as its PID 1 does. Nowhere else, and never on a
 failure. If the loop cannot continue — in a container too — spawn `/bin/sh` on
 `/dev/console` and keep reaping.
+
+A user manager (`oxinit --user`, `user.rs`) is not PID 1, and is the one
+place this bends: it exits at the end of its shutdown, in the same
+`shutdown::exit`, and when its loop cannot continue, in `user::give_up`. Both
+are reachable only with `--user`. Do not add a third.
 
 **No async.** No `tokio`, no `async-std`, no `futures`, no `async fn`. One
 thread, one `epoll` loop. This is not negotiable for `crates/oxinit`; other

@@ -17,6 +17,9 @@ Everything else is a separate process talking to PID 1 over a unix socket:
 - `oxctl` — the CLI client.
 - `oxlogd` — reads service output, writes it somewhere. See [Logs](#logs).
 - Device management — uevent handling, if it ever exists.
+- A user's services — run by that user's own manager, `oxinit --user`, which
+  is the same supervisor as a separate process. See
+  [User managers](#user-managers).
 
 The reason is blast radius. A bug in a log shipper kills a log shipper. A bug in
 PID 1 kills the machine. Code that does not need to run in PID 1 does not run in
@@ -77,14 +80,21 @@ it: a container whose event loop has broken falls back to a shell like every
 other machine, because a bug in the supervisor is not a reason to take the
 container down.
 
+**A user manager is not PID 1,** and the rules above are about PID 1. It holds
+itself to the same lints and the same `catch_unwind` — it is the same code —
+but where PID 1 must never exit, a user manager whose loop cannot go on exits
+with a failure rather than spawning a shell on a console it does not own. That
+is the second and last `exit()` in the crate, and it is reachable only with
+`--user`. See [User managers](#user-managers).
+
 ## Unsafe policy
 
 Syscalls go through [`rustix`](https://docs.rs/rustix), which wraps the raw
 interface in safe Rust. Prefer it over `libc` everywhere.
 
 Some things `rustix` does not cover — `fork` semantics between fork and exec,
-`signalfd_siginfo` decoding, `clone` flags. That code lives in one module,
-`oxinit::sys::raw`, and nowhere else. Every `unsafe` block in it carries a
+`signalfd_siginfo` decoding, `clone` flags, the typed argument of a watchdog
+`ioctl`. That code lives in one module, `oxinit::sys::raw`, and nowhere else. Every `unsafe` block in it carries a
 `// SAFETY:` comment stating the invariant that makes it sound and why the
 invariant holds at that call site.
 
@@ -164,6 +174,9 @@ This is the milestone 0 path, in order.
    create the control socket, notify socket, and timerfd.
 9. **Load units** from the unit directories, build the graph, reject cycles.
 10. **Start the default target.**
+11. **Open the hardware watchdog,** if one is configured — last, so that the
+    first write to it is the loop's own first turn. See
+    [Hardware watchdog](#hardware-watchdog).
 
 Steps 1–3 are the whole of milestone 0 alongside a reap loop and a shell.
 
@@ -176,6 +189,9 @@ what it already does. What it needs is to stop assuming it booted a machine.
 **Exactly one thing keys off the answer.** On a machine, a shutdown ends in
 `reboot(2)`. In a container it ends by exiting, because the machine is not
 oxinit's to reboot and the container lives exactly as long as its PID 1 does.
+(The hardware watchdog follows from the same answer: a container leaves the
+host's alone. A third environment, the user manager, is not detected but asked
+for with `--user`, and also ends by exiting.)
 A supervisor that stopped every unit and then stayed running is a container
 that will not stop, and `docker stop` ends that with `SIGKILL` and exit 137
 ten seconds later.
@@ -246,6 +262,11 @@ it, and it is the whole of the contract `docker stop` and a Kubernetes pod
 deletion rely on. On a machine it is not a signal anyone sends to PID 1 by
 accident. `SIGINT` is what the kernel delivers for Ctrl-Alt-Del.
 
+A user manager has nothing to power off, reboot or halt. `SIGTERM`, `SIGINT`,
+`SIGPWR`, `SIGUSR1` and `SIGHUP` all mean the same to it — stop every unit,
+then exit — and `SIGHUP` is in that list because it is what a session that
+ended sends.
+
 ## Shutdown
 
 Shutdown is a **state the supervisor is in**, not a function that runs to
@@ -271,10 +292,20 @@ only a process can produce — and a shutdown waiting on that never finishes.
 A unit waiting out a restart backoff is likewise not running and not coming
 back, so its pending restart is abandoned rather than waited on.
 
+A daemon can move itself out of the cgroup it was started in — elogind does,
+into the hierarchy it manages as a cgroup controller. Its cgroup is then empty
+and signalling the cgroup reaches nothing, so the stop also signals the
+process oxinit forked whenever `/proc` puts it outside the unit's cgroup, and
+the escalation at `stop-sec` sends that process `SIGKILL` when `cgroup.kill`
+cannot have reached it. Its exit then ends the stop: the `populated` event it
+took with it is not coming.
+
 There is a whole-shutdown deadline on top of each unit's `stop-sec`. It is not
 the normal mechanism — it is the backstop for a unit whose stop path is itself
 broken. A machine that will not power off is worse than one that loses a
-service's last write.
+service's last write. The loop wakes for it like it does for the watchdog: a
+unit that never stops sends no event, and a deadline only checked on events
+was a machine that waited for ever.
 
 Then `sync`, remount `/` read-only, and `reboot(2)` with the matching command.
 The order is the whole of it: an unflushed filesystem is what makes a reboot
@@ -290,6 +321,10 @@ exiting, with a status that tells the runtime which way. See
 If the kernel refuses to reboot a machine, oxinit stays up with everything
 stopped and says so. It does not exit: PID 1 exiting is a kernel panic.
 
+A hardware watchdog is let go of last, immediately before `reboot(2)` —
+disarmed for a power off or a halt, left running into a reboot. See
+[Hardware watchdog](#hardware-watchdog).
+
 Children get the mask reset between `fork` and `exec`. An inherited full block
 mask breaks nearly every daemon, and it breaks the service manager too: a
 service that starts with `SIGTERM` blocked cannot be stopped, only killed.
@@ -300,6 +335,116 @@ child's signal mask; the implementation that happens to clear it does so
 before `pre_exec` runs, where nothing oxinit writes can observe whether it
 happened. A requirement this load-bearing does not rest on an implementation
 detail.
+
+## Hardware watchdog
+
+A hung PID 1 is the one failure nothing on the machine can recover from. A
+crashed service has PID 1 to restart it; PID 1 has nothing above it, and a
+PID 1 stuck in a handler that never returns does not crash — it just stops
+reaping, restarting and answering. A hardware watchdog is outside it: a timer
+in the chipset that resets the machine unless it is written to within its
+timeout. oxinit is what writes to it.
+
+**Configuration.** Off unless configured. `/usr/lib/oxinit/watchdog.toml`,
+replaced wholly by `/etc/oxinit/watchdog.toml` exactly as a unit file in
+`/etc` replaces the packaged one, then the kernel command line, key by key:
+
+```toml
+device      = "/dev/watchdog0"  # the default
+timeout-sec = "30s"             # required; "0s" is no watchdog
+boot-unit   = "boot-ok"         # optional, with boot-sec
+boot-sec    = "3min"
+```
+
+| Key           | Command line                     | Meaning                                          |
+|---------------|----------------------------------|--------------------------------------------------|
+| `device`      | `oxinit.watchdog.device=`        | The device. Default `/dev/watchdog0`.            |
+| `timeout-sec` | `oxinit.watchdog.timeout-sec=`   | Asked of the driver. Whole seconds; `0s` is off. |
+| `boot-unit`   | `oxinit.watchdog.boot-unit=`     | The unit whose coming up confirms a boot.        |
+| `boot-sec`    | `oxinit.watchdog.boot-sec=`      | How long it has, from oxinit's start. `0s` is no deadline. |
+
+The command line is per key where the files are whole, because they answer
+different questions: a file is an installation's configuration, and a command
+line entry is one boot's exception to it — a boot manager entry, or a test
+image that wants the deadline short. Values are durations as in units, an
+unknown key under the prefix is an error, and an error in any of it is said
+on the console and leaves the watchdog unopened.
+
+**Fed from the loop, not from a handler.** The write happens in the loop body,
+once per wake-up, after every handler has run — not as an alarm on the
+deadline heap and not inside any handler. What keeps the machine alive is
+therefore exactly the loop coming round: a handler that never returns, a heap
+that stops firing, a loop that has given up and fallen back to the console
+shell all stop the writes. `epoll_wait` is given a timeout for this and only
+this; nothing else in oxinit wakes without a descriptor.
+
+The interval is half the timeout the driver settled on. `WDIOC_SETTIMEOUT`
+returns what the hardware can actually count, which need not be what was
+asked, and the interval follows the answer. A driver that will neither take a
+timeout nor report its own is written to every second. The write is one byte
+that is not `V`, the keepalive every driver has understood since before the
+ioctl existed.
+
+**Opened last, and looked for again.** The device is opened after the
+default target has been started, so the first write is the loop's first turn.
+A device that is not there — a driver built as a module that nothing has
+loaded yet — is not an error: it is tried again every interval until it
+appears, and said once. The descriptor is `CLOEXEC`, because a service that
+inherited it could keep a hung machine alive, or reset a working one by
+closing it.
+
+A watchdog an initramfs started before oxinit keeps counting until then, and
+opening it takes it over. A watchdog device is single-open, so while oxinit
+holds it nothing else can stop or feed it.
+
+**The boot deadline.** With `boot-unit` and `boot-sec`, a boot has to confirm
+itself: the named unit has to *come up* — reach `Active`, or, for a
+`oneshot`, which never does, run to a clean exit — within `boot-sec` of
+oxinit starting. Until it has, the watchdog is fed only up to the deadline.
+Past it, oxinit stops writing for good and the hardware resets the machine
+one timeout later. That is what lets a boot manager that counts attempts see
+a boot that hung — in a unit, in the graph, anywhere short of the unit that
+says "this boot worked" — as a failed attempt, the same as a kernel panic.
+
+- *Final.* A unit that comes up after the deadline does not rescue it: the
+  decision was made, the timer is running, and feeding it again would make
+  the outcome depend on how long the reset happened to take.
+- *Stopping and reset are different answers.* Overdue, oxinit stops feeding
+  rather than rebooting cleanly. The deadline exists for a boot that went
+  wrong, and the reset is the one path that does not depend on whatever went
+  wrong.
+- *A shutdown suspends it.* A boot interrupted by an operator is not a boot
+  that hung, and the shutdown has its own deadline. The writes continue.
+- *A boot unit that does not exist* is said at boot, and the deadline still
+  applies: the configuration asked for a confirmed boot, and nothing can
+  confirm this one. Running without the deadline would be a different
+  configuration, not a smaller version of it.
+- *Measured from oxinit's start.* Firmware, kernel and initramfs come before
+  it, and bounding those is the job of whatever armed the watchdog first.
+
+**Shutdown.** The writes continue through the ordered stop — a shutdown that
+hangs is a hung PID 1. At the end, after `sync` and the read-only remount and
+immediately before `reboot(2)`:
+
+| Ends in             | The watchdog                                                       |
+|---------------------|--------------------------------------------------------------------|
+| power off, halt     | Disarmed: `V`, then close — the magic close. A halted machine must stay halted. |
+| reboot              | Written once more and left running. A kernel that hangs on the way down is reset into the reboot it was asked for. |
+
+A kernel built with `CONFIG_WATCHDOG_NOWAYOUT` refuses the magic close; such a
+machine halts and is reset one timeout later, and the kernel log says why.
+Many drivers stop themselves at the kernel's reboot notifier, which runs
+after the point where the hang above could happen.
+
+**Never in a container, never in a user manager.** A privileged container can
+open the host's `/dev/watchdog`, and whether the host resets is not a
+container's call. A user manager has no business with hardware at all.
+
+`oxinit-watchdog` holds the configuration and every timing decision — when to
+open, when to write, when the deadline has passed, what to do at the end — as
+a state machine that takes the time since oxinit started as an argument and
+makes no syscall. The device, the two ioctls (in `sys::raw`) and the writes
+are in the `oxinit` crate.
 
 ## Reaping
 
@@ -352,6 +497,11 @@ Kernel notification that the `populated` key changed. See cgroup v2 below.
 `EPOLLIN` while its service is down. Readable means a connection is waiting.
 oxinit does not accept it; it starts the service, which does. See socket
 activation above.
+
+`epoll_wait` blocks with no timeout, with one exception: with a hardware
+watchdog configured, it is bounded by when the watchdog is next due. That is
+the only thing in oxinit that wakes the loop without a descriptor becoming
+ready, and the reason is in [Hardware watchdog](#hardware-watchdog).
 
 epoll hands back one `u64` per registration and nothing else, so the token has
 to carry both what kind of descriptor woke the loop and which one: the high
@@ -901,6 +1051,106 @@ running process would describe something that is not what is running. A socket
 unit is not re-bound either: its descriptors were bound and registered with
 epoll once, at boot.
 
+## User managers
+
+A desktop expects services that run as the logged-in user rather than as a
+system account: an audio server and its session manager, portals, agents.
+They belong to one user, they need that user's session — its runtime
+directory and its bus — and they should stop when the user is done.
+
+**The same supervisor, run by the user.** `oxinit --user` is the `oxinit`
+binary with a different entry point, not a second program. Units, the graph,
+the state machine and restart policy, timers, socket activation, `sd_notify`,
+the control protocol and log pipes are all the same code, so a user unit means
+exactly what the same file means to PID 1, and the rules the crate holds
+itself to apply to it unchanged. A separate binary would be a second copy of
+the event loop, and the copy is what would drift.
+
+What differs, and why:
+
+| | PID 1 | `oxinit --user` |
+|---|---|---|
+| Runs as | root, pid 1 | the user; refused as root, and as pid 1 |
+| Mounts, console, hostname, environment detection | yes | none: not its machine |
+| Sockets | `/run/oxinit/` | `$XDG_RUNTIME_DIR/oxinit/`, `0700` |
+| Units | `/usr/lib/oxinit/units`, `/etc/oxinit/units` | `/usr/lib/oxinit/user-units`, `/etc/oxinit/user-units`, `$XDG_CONFIG_HOME/oxinit/user-units` |
+| `user`, `tty` | as specified | refused at load; every service runs as the user, `%u` is the user |
+| cgroups | the hierarchy | its own cgroup's subtree if delegated to the user; otherwise none |
+| Orphans | reparented to it | reparented to it: it is a child subreaper |
+| Stop signals | power off, reboot, halt | stop every unit and exit; `SIGHUP` too |
+| End of a shutdown | `reboot(2)` | exit 0 |
+| Loop cannot continue | console shell, never exits | exit 1 |
+| Hardware watchdog | if configured | never |
+
+*`user` refused rather than ignored*, because a user manager has no one else
+to run a service as, and a unit that says `user = "root"` and silently gets
+the user is a unit that does not do what it says. *`tty` refused* because the
+terminal belongs to the session, and a service claiming it would take it from
+the user's own shell.
+
+*cgroups only if delegated.* A user manager can only create cgroups under one
+it may write to, which means something above it chowned one to the user.
+Nothing does on a machine without systemd-logind, so the usual case is none,
+and that is PID 1's own degraded mode: every service runs, and what needs a
+cgroup — `[resources]`, `forking` readiness, `cgroup.kill` — fails on the
+unit that asked for it, saying why. Being a subreaper keeps the rest of the
+supervision honest without one: a daemon that double-forks is still this
+manager's child to reap.
+
+*Exit, not a shell,* when the loop breaks — see [Failure policy](#failure-policy).
+Its services are left running, reparented upward; stopping them would need
+the loop that just failed.
+
+**One per user, and the control socket is the lock.** A second `oxinit
+--user` for the same user — a second session — first connects to the control
+socket. If a manager answers, it says so and exits 0: the services that
+session wants are already running. A socket file nobody answers on is a
+manager that died, and is replaced.
+
+**It manages services, not sessions.** oxinit does not manage logins, so it
+does not decide when a user manager starts or stops: whatever starts the
+session starts it, with the session's environment, and signals it when the
+session ends — `SIGTERM` or `SIGHUP`. It needs `XDG_RUNTIME_DIR` (a login
+session has it from `pam_elogind`, `pam_rundir` or `pam_systemd`) and `HOME`.
+Its services inherit its environment minus the protocol variables, as system
+services inherit PID 1's, so it should be started after the session bus
+exists and with `DBUS_SESSION_BUS_ADDRESS` set.
+
+A user manager without a session — services that outlive logout — is a system
+unit with `user = "<name>"` running `oxinit --user` with those two variables
+set. That is how the test image runs one.
+
+**Logs.** `output = "log"` works as it does for PID 1, with `oxlogd --user` as
+one of the user's own units: the socket is under the runtime directory and the
+files are `$XDG_STATE_HOME/oxinit/log/<unit>.log`, where `oxctl --user logs`
+reads them. State rather than cache, because logs are worth keeping across a
+reboot.
+
+**`oxctl --user`** talks to the calling user's manager. The socket is `0600`
+in a `0700` directory owned by the user — the same authorization story as
+PID 1's, one level down: access to it is control of that user's services.
+
+`oxinit-paths` resolves where all of this is, for either scope, from an
+environment it is handed; `oxinit-unit` holds the user unit directories and
+the user-scope rules. Both are host-tested.
+
+**Open, and not built.** Each of these is a decision, not a gap in the code
+above:
+
+- **Proposed:** *Several sessions of one user.* The first session's manager
+  serves the second, but the first session ending stops it. Counting sessions
+  is a login manager's knowledge, not a service manager's — the shape is a
+  small launcher that a PAM session hook talks to, as Chimera Linux's
+  turnstile does — and it belongs outside oxinit.
+- **Proposed:** *Delegation.* PID 1 could chown a cgroup to the user for a
+  system unit that asks for it, which would give the "user manager as a
+  system unit" form above full cgroup support. It needs a unit key, which is
+  a unit-format change with its own design.
+- *Environment set after start.* A variable the session creates after the
+  manager started — `WAYLAND_DISPLAY` — is not seen by its services. systemd's
+  answer is an `import-environment` request; oxinit has no such request yet,
+  and adding one is a protocol change.
+
 ## Workspace layout
 
 ```
@@ -917,7 +1167,9 @@ oxinit/
 │  ├─ oxinit-user/       # /etc/passwd and /etc/group
 │  ├─ oxinit-ipc/        # control protocol types
 │  ├─ oxinit-log/        # record format, rotation policy, paths
+│  ├─ oxinit-paths/      # where the sockets and logs are, system and user
 │  ├─ oxinit-timer/      # schedules and calendar arithmetic
+│  ├─ oxinit-watchdog/   # hardware watchdog configuration and policy
 │  ├─ notify-probe/      # test fixture: a service that speaks sd_notify
 │  ├─ listen-probe/      # test fixture: a socket-activated service
 │  └─ xtask/             # build and boot automation
@@ -950,6 +1202,13 @@ tested without a kernel should not be in it.
   read into records, bounding one that never ends, and choosing when to rotate.
   All three programs agree on it because all three depend on it, and none of it
   needs a descriptor to test.
+- `oxinit-paths` is where every socket and log directory is, for PID 1 and for
+  a user manager. All three programs depend on it, and so do the crates whose
+  constants used to be the only definition.
+- `oxinit-watchdog` decides when the hardware watchdog is written to, when it
+  stops being written to, and what happens to it at shutdown. A mistake there
+  resets a working machine or fails to reset a hung one, and neither is
+  something to find out on hardware.
 
 ## Development loop
 
@@ -999,6 +1258,13 @@ the terminal, which is why the boot sequence wires stdio to `/dev/console`.
   The exit code is the assertion that matters. `SIGKILL` after a grace period
   is 137, and every `docker stop` produced it until PID 1 both handled
   `SIGTERM` and exited afterwards.
+- **A hardware watchdog.** `cargo xtask test-watchdog` boots with QEMU's
+  i6300esb twice. Once fed for several timeouts and then halted, and still
+  running long after the halt — which only a magic close explains, because
+  `-no-reboot` turns the watchdog's reset into QEMU exiting. Once with a boot
+  unit that fails, a deadline shortened from the kernel command line, and a
+  machine that is reset. The driver is a module in the kernel it boots, loaded
+  by a unit, so the device appearing late is exercised too.
 - **A real userspace.** `cargo xtask test-distro` runs the same units against
   a distribution's own root filesystem rather than a hand-assembled one, which
   is the only test in which the services oxinit execs are dynamically linked

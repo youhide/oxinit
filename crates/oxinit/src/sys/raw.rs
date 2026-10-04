@@ -1,18 +1,19 @@
 //! The only `unsafe` in the crate.
 //!
-//! rustix covers every syscall oxinit needs except three: `sigprocmask`
+//! rustix covers every syscall oxinit needs except four: `sigprocmask`
 //! (exposed only under rustix's unstable `runtime` feature), `signalfd`
-//! (listed in rustix's own `not_implemented.rs`), and what a child does
-//! between `fork` and `exec`, which is not a syscall at all but a closure the
+//! (listed in rustix's own `not_implemented.rs`), the two watchdog `ioctl`s,
+//! which rustix can issue but cannot type, and what a child does between
+//! `fork` and `exec`, which is not a syscall at all but a closure the
 //! standard library runs in a process that may only call async-signal-safe
-//! functions. All three are here, wrapped, and nothing outside this module
-//! touches libc.
+//! functions. All of them are here, wrapped, and nothing outside this module
+//! touches libc or an `ioctl`.
 //!
 //! Every `unsafe` block below states its invariant.
 
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 use std::ptr;
@@ -91,12 +92,48 @@ pub fn read_signals(fd: &OwnedFd, out: &mut Vec<u32>) -> Result<(), Errno> {
     let n = rustix::io::read(fd, buf.as_mut_slice())?;
 
     out.clear();
-    for record in buf.get(..n).unwrap_or(&[]).chunks_exact(SIGINFO_SIZE) {
+    for record in buf.get(..n).unwrap_or(&[]).as_chunks::<SIGINFO_SIZE>().0 {
         if let Some(signo) = record.get(..4).and_then(|b| b.try_into().ok()) {
             out.push(u32::from_ne_bytes(signo));
         }
     }
     Ok(())
+}
+
+/// `WDIOC_SETTIMEOUT` from `<linux/watchdog.h>`: `_IOWR('W', 6, int)`.
+const WDIOC_SETTIMEOUT: rustix::ioctl::Opcode =
+    rustix::ioctl::opcode::read_write::<libc::c_int>(b'W', 6);
+
+/// `WDIOC_GETTIMEOUT`: `_IOR('W', 7, int)`.
+const WDIOC_GETTIMEOUT: rustix::ioctl::Opcode = rustix::ioctl::opcode::read::<libc::c_int>(b'W', 7);
+
+/// Ask a watchdog for a timeout, in seconds. Returns the one the driver
+/// settled on, which it may have rounded to what the hardware can count.
+pub fn watchdog_set_timeout(device: BorrowedFd<'_>, seconds: i32) -> Result<i32, Errno> {
+    let mut value: libc::c_int = seconds;
+
+    // SAFETY: WDIOC_SETTIMEOUT is the opcode the kernel defines for this
+    // request, and its argument is a pointer to an `int`, which `value` is.
+    // The kernel writes the timeout it applied back through the same pointer,
+    // and `value` lives on this frame until the call has returned.
+    unsafe {
+        let updater = rustix::ioctl::Updater::<WDIOC_SETTIMEOUT, libc::c_int>::new(&mut value);
+        rustix::ioctl::ioctl(device, updater)?;
+    }
+
+    Ok(value)
+}
+
+/// The timeout a watchdog is running with, in seconds.
+pub fn watchdog_get_timeout(device: BorrowedFd<'_>) -> Result<i32, Errno> {
+    // SAFETY: WDIOC_GETTIMEOUT is the opcode the kernel defines for this
+    // request, and what it writes through its argument is one `int`, which is
+    // the output type given here; the getter owns that storage for the
+    // duration of the call.
+    unsafe {
+        let getter = rustix::ioctl::Getter::<WDIOC_GETTIMEOUT, libc::c_int>::new();
+        rustix::ioctl::ioctl(device, getter)
+    }
 }
 
 /// What a service's process does between `fork` and `exec`.

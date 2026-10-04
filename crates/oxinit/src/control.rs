@@ -8,18 +8,22 @@
 //!
 //! Authorization is the socket's mode. `0600`, owned by root, in a root-owned
 //! directory. There is no in-protocol authentication and no per-command
-//! permissions: access to this socket is full control of the machine.
+//! permissions: access to this socket is full control of the machine. A user
+//! manager's is the same thing one level down — `0600`, owned by the user, in
+//! their `0700` runtime directory — and is full control of that user's
+//! services.
 //!
 //! Nothing here blocks. A client connection is registered with epoll like
 //! every other descriptor, so a client that connects and says nothing costs a
 //! slot and no time at all.
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::Path;
 
 use rustix::fs::Mode;
 use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
 
-use oxinit_ipc::{CONTROL_PATH, MAX_MESSAGE};
+use oxinit_ipc::MAX_MESSAGE;
 
 use crate::error::{Error, Result};
 
@@ -48,14 +52,15 @@ pub struct Control {
 }
 
 impl Control {
-    pub fn bind() -> Result<Self> {
-        if let Some(parent) = std::path::Path::new(CONTROL_PATH).parent() {
+    pub fn bind(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         // /run is a fresh tmpfs, so a leftover should be impossible. Removed
         // anyway: the alternative failure is EADDRINUSE on a socket nothing is
-        // listening to, at boot, which is a miserable thing to debug.
-        let _ = std::fs::remove_file(CONTROL_PATH);
+        // listening to, at boot, which is a miserable thing to debug. A user
+        // manager asks whether one is still answering before it gets here.
+        let _ = std::fs::remove_file(path);
 
         let listener = rustix::net::socket_with(
             AddressFamily::UNIX,
@@ -65,12 +70,12 @@ impl Control {
         )
         .map_err(Error::Control)?;
 
-        let addr = SocketAddrUnix::new(CONTROL_PATH).map_err(Error::Control)?;
+        let addr = SocketAddrUnix::new(path).map_err(Error::Control)?;
         rustix::net::bind(&listener, &addr).map_err(Error::Control)?;
 
         // After bind, because the file does not exist until then. This is the
         // whole of the authorization story for the socket.
-        rustix::fs::chmod(CONTROL_PATH, Mode::from_raw_mode(0o600)).map_err(Error::Control)?;
+        rustix::fs::chmod(path, Mode::from_raw_mode(0o600)).map_err(Error::Control)?;
 
         rustix::net::listen(&listener, BACKLOG).map_err(Error::Control)?;
 
@@ -94,7 +99,7 @@ impl Control {
         let fd = rustix::net::accept_with(&self.listener, SocketFlags::CLOEXEC).ok()?;
 
         if self.clients.len() >= MAX_CLIENTS {
-            eprintln!("oxinit: control: {MAX_CLIENTS} clients already connected; refusing");
+            report!("oxinit: control: {MAX_CLIENTS} clients already connected; refusing");
             return None;
         }
 
@@ -130,7 +135,7 @@ impl Control {
             return None;
         }
         if sent > buf.len() {
-            eprintln!("oxinit: control: {sent} byte request over the {MAX_MESSAGE} byte limit");
+            report!("oxinit: control: {sent} byte request over the {MAX_MESSAGE} byte limit");
             return None;
         }
 
@@ -147,7 +152,7 @@ impl Control {
         // socket: it either fits or it is refused, and the size was checked
         // when the message was encoded.
         if let Err(e) = rustix::net::send(&client.fd, message, SendFlags::empty()) {
-            eprintln!("oxinit: control: reply: {e}");
+            report!("oxinit: control: reply: {e}");
         }
     }
 

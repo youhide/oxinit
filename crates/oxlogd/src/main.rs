@@ -6,6 +6,9 @@
 //! that descriptor is that unit's output, and it goes to
 //! `/var/log/oxinit/<unit>.log` a line at a time, timestamped.
 //!
+//! With `--user` it is the same thing for a user manager: the socket under the
+//! user's `$XDG_RUNTIME_DIR`, the files under `~/.local/state/oxinit/log`.
+//!
 //! **PID 1 does not do this.** A service writing a megabyte a second must not
 //! be able to make PID 1 do work, and a bug in a log writer must kill a log
 //! writer. That is the same argument that put `oxctl` out of process, and it
@@ -36,7 +39,8 @@ use rustix::net::{
     SocketFlags, SocketType,
 };
 
-use oxinit_log::{Move, Rotation, Splitter, Timestamp, LOG_DIR, MAX_MESSAGE, SOCKET_PATH};
+use oxinit_log::{Move, Rotation, Splitter, Timestamp, MAX_MESSAGE};
+use oxinit_paths::Paths;
 
 /// How much to take from a pipe at once.
 ///
@@ -60,14 +64,23 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    // `--user`: the shipper for a user manager, which is a unit of that
+    // manager's like this is a unit of PID 1's. Its socket and its files are
+    // under the user's own directories.
+    let paths = if std::env::args().any(|arg| arg == "--user") {
+        Paths::user_from_env().map_err(|e| format!("--user: {e}"))?
+    } else {
+        Paths::system()
+    };
+
     let dir = std::env::args()
         .skip_while(|arg| arg != "--dir")
         .nth(1)
-        .map_or_else(|| PathBuf::from(LOG_DIR), PathBuf::from);
+        .map_or_else(|| paths.log_dir.clone(), PathBuf::from);
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-    let socket = connect()?;
+    let socket = connect(&paths)?;
     println!("oxlogd: connected, writing to {}", dir.display());
 
     // Only once the socket is up. A `type = "notify"` unit that said it was
@@ -82,7 +95,7 @@ fn run() -> Result<(), String> {
 /// oxinit is the server. If it is not listening, there is nothing to wait for
 /// — the restart policy is what retries, at a backoff oxinit already knows how
 /// to compute.
-fn connect() -> Result<OwnedFd, String> {
+fn connect(paths: &Paths) -> Result<OwnedFd, String> {
     let socket = rustix::net::socket_with(
         AddressFamily::UNIX,
         SocketType::SEQPACKET,
@@ -91,12 +104,19 @@ fn connect() -> Result<OwnedFd, String> {
     )
     .map_err(|e| format!("socket: {e}"))?;
 
-    let addr = SocketAddrUnix::new(SOCKET_PATH).map_err(|e| format!("{SOCKET_PATH}: {e}"))?;
+    let path = paths.log_socket();
+    let addr = SocketAddrUnix::new(&path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     rustix::net::connect(&socket, &addr).map_err(|e| {
         format!(
-            "connect {SOCKET_PATH}: {e}\n\
-             is oxinit running as PID 1, and are you root?"
+            "connect {}: {e}\n\
+             is oxinit running{}?",
+            path.display(),
+            if paths.is_user() {
+                " for this user"
+            } else {
+                " as PID 1, and are you root"
+            }
         )
     })?;
 

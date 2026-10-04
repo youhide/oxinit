@@ -62,6 +62,18 @@ pub enum UnitError {
     #[error("invalid unit name `{unit}`: expected only letters, digits, `_`, `.`, and `-`")]
     Name { unit: String },
 
+    #[error(
+        "user unit `{unit}`: `user` is for system units; a user manager runs \
+         every service as its own user"
+    )]
+    UserInUserUnit { unit: String },
+
+    #[error(
+        "user unit `{unit}`: `tty` is for system units; the terminal belongs to \
+         the user's session"
+    )]
+    TtyInUserUnit { unit: String },
+
     #[error("read {path}: {message}")]
     Read { path: String, message: String },
 

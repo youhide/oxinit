@@ -271,6 +271,11 @@ immediate and says what was *asked for*, not what has finished: a stop ends
 when the unit's cgroup empties, and the one socket that has to stay responsive
 does not wait on the slowest thing on the machine.
 
+`oxctl --user` asks the same things of your own user manager — `oxinit
+--user`, the same supervisor run by a user for their own services, with units
+in `~/.config/oxinit/user-units` and sockets under `$XDG_RUNTIME_DIR`. Whatever
+starts your session starts it; oxinit does not manage logins.
+
 ## Logs
 
 A service declaring `output = "log"` writes into a pipe rather than onto the
@@ -325,7 +330,7 @@ getting it wrong strands the machine.
 
 ## Current state
 
-Milestones 0 through 14 are done, and the roadmap is closed. oxinit boots under QEMU and runs as a
+Milestones 0 through 18 are done, and the roadmap is closed. oxinit boots under QEMU and runs as a
 container's PID 1.
 
 | | |
@@ -347,12 +352,14 @@ container's PID 1.
 | **M14** | Calendar schedules on the wall clock; datagram sockets; the list closed. |
 | **M15** | The documents' invariants enforced by the build, not by discipline. |
 | **M16** | A demo, a released binary, and a README that starts at the beginning. |
+| **M17** | A hardware watchdog fed from the loop, with a boot deadline. |
+| **M18** | User managers: `oxinit --user`, `oxctl --user`, `oxlogd --user`. |
 
 One `epoll` loop multiplexes the signalfd, the timerfd, the notify socket, the
 control socket, every socket unit's listening descriptor and every service
 cgroup's `cgroup.events`. One thread. No async runtime.
 
-Nothing is scheduled after M16. [ROADMAP.md](ROADMAP.md) has the breakdown —
+Nothing is scheduled after M18. [ROADMAP.md](ROADMAP.md) has the breakdown —
 what each milestone was verified against, what was deferred out of it, and
 which remaining ideas are deliberately not being taken.
 

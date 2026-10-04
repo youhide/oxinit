@@ -22,7 +22,8 @@ rustup target add aarch64-unknown-linux-musl
 MSRV is stable minus two releases. No nightly features are used.
 
 **Tools.** `qemu-system-x86_64`, `qemu-system-aarch64` and `cpio`. Docker or
-podman as well, for `cargo xtask container`, `test-distro` and `test-demo`.
+podman as well, for `cargo xtask container`, `test-distro`, `test-demo` and
+`test-watchdog`.
 
 ```bash
 # Debian/Ubuntu
@@ -123,6 +124,9 @@ cargo xtask test-boot --arch all            # M9: x86_64 and aarch64, in turn
 cargo xtask container                       # M6: runs it in Docker, same
 cargo xtask test-demo                       # M16: every command the README gives
 cargo xtask test-distro                     # M10: a real Alpine userspace
+cargo test -p oxinit-watchdog               # M17: when to feed, when to starve
+cargo xtask test-watchdog                   # M17: QEMU's i6300esb, fed and starved
+cargo test -p oxinit-paths                  # M18: where a user manager's things are
 ```
 
 The library crates have no Linux dependencies and run anywhere. Parser, graph,

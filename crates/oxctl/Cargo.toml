@@ -16,4 +16,5 @@ publish.workspace = true
 [dependencies]
 oxinit-ipc = { path = "../oxinit-ipc" }
 oxinit-log = { path = "../oxinit-log" }
+oxinit-paths = { path = "../oxinit-paths" }
 rustix = { workspace = true, features = ["net"] }

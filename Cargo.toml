@@ -9,10 +9,12 @@ members = [
     "crates/oxinit-graph",
     "crates/oxinit-ipc",
     "crates/oxinit-log",
+    "crates/oxinit-paths",
     "crates/oxinit-service",
     "crates/oxinit-timer",
     "crates/oxinit-unit",
     "crates/oxinit-user",
+    "crates/oxinit-watchdog",
     "crates/oxlogd",
     "crates/xtask",
 ]

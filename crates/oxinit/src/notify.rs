@@ -20,26 +20,26 @@ use oxinit_service::notify::{parse, Message};
 
 use crate::error::{Error, Result};
 
-/// Where services send readiness. Also the value of `NOTIFY_SOCKET`.
-pub const NOTIFY_PATH: &str = "/run/oxinit/notify";
-
 pub struct Notify {
     socket: OwnedFd,
 }
 
 impl Notify {
-    pub fn bind() -> Result<Self> {
-        if let Some(parent) = Path::new(NOTIFY_PATH).parent() {
+    /// Bind the socket services send readiness to. `path` is also the value
+    /// of `NOTIFY_SOCKET`: `/run/oxinit/notify` for the system, under the
+    /// user's runtime directory for a user manager.
+    pub fn bind(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         // A stale socket from a previous boot would make bind fail with
         // EADDRINUSE. /run is a fresh tmpfs so this is belt and braces.
-        let _ = std::fs::remove_file(NOTIFY_PATH);
+        let _ = std::fs::remove_file(path);
 
         let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::DGRAM, None)
             .map_err(Error::Notify)?;
 
-        let addr = SocketAddrUnix::new(NOTIFY_PATH).map_err(Error::Notify)?;
+        let addr = SocketAddrUnix::new(path).map_err(Error::Notify)?;
         rustix::net::bind(&socket, &addr).map_err(Error::Notify)?;
 
         // Without SO_PASSCRED the kernel attaches no credentials and every

@@ -45,7 +45,7 @@ impl Cgroups {
         // decides if delegation could work at all — so it is worth one line at
         // boot, from the kernel's answer rather than oxinit's intention.
         if let Ok(placement) = std::fs::read_to_string("/proc/self/cgroup") {
-            println!("oxinit: pid 1 is in {}", placement.trim());
+            println!("oxinit: pid {init} is in {}", placement.trim());
         }
 
         Ok(Self {

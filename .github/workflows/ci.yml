@@ -75,7 +75,7 @@ jobs:
         run: python3 .github/scripts/check-release-notes.py
 
       - name: Host tests
-        run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer
+        run: cargo test -p oxinit-unit -p oxinit-graph -p oxinit-service -p oxinit-cgroup -p oxinit-user -p oxinit-ipc -p oxinit-log -p oxinit-timer -p oxinit-paths -p oxinit-watchdog
 
   msrv:
     name: builds on the declared MSRV

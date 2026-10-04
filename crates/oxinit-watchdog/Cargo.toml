@@ -1,0 +1,19 @@
+[package]
+name = "oxinit-watchdog"
+version.workspace = true
+description = "Hardware watchdog configuration and the policy for feeding it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No Linux dependencies and no syscalls. When to pet, when to stop petting and
+# what to do with the device on the way down are the decisions that reset a
+# machine or fail to, and they are tested on the host. Opening the device and
+# the ioctl stay in the `oxinit` crate.
+[dependencies]
+oxinit-unit = { path = "../oxinit-unit" }
+basic-toml.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true

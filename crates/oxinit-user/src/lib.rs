@@ -127,6 +127,26 @@ pub fn resolve(name: &str, passwd: &str, group: &str) -> Result<Identity, UserEr
     })
 }
 
+/// The account name for `uid`, from the real `/etc/passwd`.
+///
+/// What a user manager calls the user it runs as: `%u` in its units, and its
+/// own messages. Falls back to the number, because an account that exists
+/// only in a directory service still logged in, and refusing to supervise
+/// its services over a name would be the wrong failure.
+pub fn name_of_system(uid: u32) -> String {
+    let passwd = std::fs::read_to_string(PASSWD_PATH).unwrap_or_default();
+    name_of(uid, &passwd).unwrap_or_else(|| uid.to_string())
+}
+
+/// The first account in a passwd file with this uid.
+pub fn name_of(uid: u32, passwd: &str) -> Option<String> {
+    passwd
+        .lines()
+        .filter_map(fields)
+        .find(|fields| fields.get(2).and_then(|v| v.parse::<u32>().ok()) == Some(uid))
+        .and_then(|fields| fields.first().map(|name| (*name).to_owned()))
+}
+
 /// The colon-separated fields of one line, or `None` if the line is not an
 /// entry.
 ///
@@ -172,6 +192,14 @@ nobody:x:65534:
 
     fn resolved(name: &str) -> Identity {
         resolve(name, PASSWD, GROUP).unwrap()
+    }
+
+    #[test]
+    fn a_uid_has_a_name() {
+        assert_eq!(name_of(1000, PASSWD).as_deref(), Some("oxinit"));
+        assert_eq!(name_of(0, PASSWD).as_deref(), Some("root"));
+        assert_eq!(name_of(4242, PASSWD), None);
+        assert_eq!(name_of(1000, "# nothing\nbroken\n"), None);
     }
 
     #[test]

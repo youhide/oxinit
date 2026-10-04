@@ -1,0 +1,8 @@
+# A user unit runs as the manager's user, and `%u` is that user. Both halves
+# of the line come out as `nobody` or neither does.
+[unit]
+description = "Says who it runs as"
+
+[service]
+type = "oneshot"
+exec = '/bin/sh -c "/bin/echo oxinit-user: %u is $(/usr/bin/id -un)"'

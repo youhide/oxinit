@@ -11,7 +11,9 @@ publish.workspace = true
 # Shared by oxinit, oxlogd and oxctl, so all three agree on where a log is and
 # what a line in it looks like.
 #
-# No dependencies at all, and no syscalls. Splitting a read into records,
-# bounding a line that never ends, and deciding when to rotate are where the
-# bugs would be, and none of it needs a descriptor to test.
+# No syscalls, and no dependency but the one that says where things are.
+# Splitting a read into records, bounding a line that never ends, and deciding
+# when to rotate are where the bugs would be, and none of it needs a
+# descriptor to test.
 [dependencies]
+oxinit-paths = { path = "../oxinit-paths" }

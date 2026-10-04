@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,14 +12,14 @@ use rustix::process::{Pid, Signal};
 use oxinit_cgroup::Cgroup;
 use oxinit_ipc::{Request, Response, UnitStatus};
 use oxinit_service::{Exit, Instance, State, StopCause};
-use oxinit_unit::{Kind, Output, Resources, ServiceType, Unit};
+use oxinit_unit::{Kind, Output, Resources, Scope, ServiceType, Unit};
 
 use crate::cgroup::{self, Cgroups};
 use crate::error::Error;
 use crate::event::{EventLoop, Source};
 use crate::listen::Sockets;
 use crate::logs::Logs;
-use crate::notify::{self, Notify};
+use crate::notify::Notify;
 use crate::reap;
 use crate::shutdown::{Action, Shutdown};
 use crate::sys::raw::{setup_child, ChildSetup, Image, FIRST_LISTEN_FD};
@@ -30,6 +31,10 @@ pub struct Supervisor {
     /// Kept for `reload`, which has to expand `%H` the same way the first
     /// load did or the same file would parse into a different unit.
     hostname: String,
+    /// Where the units are, which manager reads them, and where the sockets
+    /// its services are told about live. Kept for `reload` and for every
+    /// start, for the same reason.
+    source: UnitSource,
     /// Resolved start order. Also the order things are reported in.
     order: Vec<String>,
     pub timers: Timers,
@@ -58,26 +63,60 @@ pub struct Supervisor {
     shutdown: Option<Shutdown>,
 }
 
+/// Which units, read how, for which manager.
+pub struct UnitSource {
+    /// Lowest precedence first. Each replaces a file of the same name in the
+    /// ones before it, wholly.
+    pub dirs: Vec<PathBuf>,
+    pub scope: Scope,
+    /// The value of `NOTIFY_SOCKET` for a `notify` service.
+    pub notify: PathBuf,
+}
+
+impl UnitSource {
+    /// PID 1's: `/usr/lib/oxinit/units`, then `/etc/oxinit/units`.
+    pub fn system() -> Self {
+        Self {
+            dirs: vec![
+                PathBuf::from(oxinit_unit::VENDOR_DIR),
+                PathBuf::from(oxinit_unit::ETC_DIR),
+            ],
+            scope: Scope::System,
+            notify: PathBuf::from(oxinit_paths::system::NOTIFY),
+        }
+    }
+
+    fn load(&self, hostname: &str) -> oxinit_unit::Loaded {
+        let dirs: Vec<&Path> = self.dirs.iter().map(PathBuf::as_path).collect();
+        oxinit_unit::load_dirs_in(&dirs, hostname, &self.scope)
+    }
+
+    fn is_user(&self) -> bool {
+        matches!(self.scope, Scope::User { .. })
+    }
+}
+
 impl Supervisor {
     /// Load and resolve. Starting is a separate step so the caller can
     /// register the timerfd with epoll first.
     pub fn load(
         hostname: &str,
+        source: UnitSource,
         timers: Timers,
         notify: Notify,
         cgroups: Cgroups,
         logs: Logs,
     ) -> Self {
-        let loaded = oxinit_unit::load_default(hostname);
+        let loaded = source.load(hostname);
         for error in &loaded.errors {
-            eprintln!("oxinit: {error}");
+            report!("oxinit: {error}");
         }
 
         let instances = BTreeMap::new();
         let mut order = Vec::new();
 
         if loaded.units.is_empty() {
-            eprintln!("oxinit: no units found");
+            report!("oxinit: no units found");
             return Self {
                 instances,
                 order,
@@ -91,6 +130,7 @@ impl Supervisor {
                 next_elapse: BTreeMap::new(),
                 shutdown: None,
                 hostname: hostname.to_owned(),
+                source,
             };
         }
 
@@ -99,13 +139,13 @@ impl Supervisor {
         match oxinit_graph::resolve(&loaded.units) {
             Ok(plan) => {
                 for warning in &plan.warnings {
-                    eprintln!("oxinit: {warning}");
+                    report!("oxinit: {warning}");
                 }
                 order = plan.order;
             }
             Err(e) => {
-                eprintln!("oxinit: {e}");
-                eprintln!("oxinit: refusing to start with an unresolvable unit set");
+                report!("oxinit: {e}");
+                report!("oxinit: refusing to start with an unresolvable unit set");
             }
         }
 
@@ -122,6 +162,7 @@ impl Supervisor {
             next_elapse: BTreeMap::new(),
             shutdown: None,
             hostname: hostname.to_owned(),
+            source,
         };
 
         // An instance for every unit that loaded, not just the ones in the
@@ -136,7 +177,7 @@ impl Supervisor {
             // cgroup rather than churning the hierarchy and the registration.
             if matches!(unit.kind, Kind::Service(_)) {
                 if let Err(e) = supervisor.cgroups.add(name, &unit.full_name()) {
-                    eprintln!("oxinit: {name}: {e}");
+                    report!("oxinit: {name}: {e}");
                 }
             }
 
@@ -153,7 +194,7 @@ impl Supervisor {
             };
 
             for failure in supervisor.sockets.bind(name, socket) {
-                eprintln!("oxinit: {name}: {failure}");
+                report!("oxinit: {name}: {failure}");
             }
         }
 
@@ -162,6 +203,18 @@ impl Supervisor {
 
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+
+    /// Whether a unit by this name was loaded.
+    pub fn knows(&self, name: &str) -> bool {
+        self.instances.contains_key(name)
+    }
+
+    /// Whether a unit has ever come up. See `Instance::reached`.
+    pub fn reached(&self, name: &str) -> bool {
+        self.instances
+            .get(name)
+            .is_some_and(|instance| instance.reached)
     }
 
     /// Queue every unit in the resolved order, then start whatever is ready.
@@ -203,7 +256,7 @@ impl Supervisor {
             // yet. Having already failed is the only thing that can be known,
             // and it is the thing the unit format promises to act on.
             if let Some(failed) = self.failed_requirement(&name) {
-                eprintln!("oxinit: {name}: requires `{failed}`, which failed; not starting");
+                report!("oxinit: {name}: requires `{failed}`, which failed; not starting");
                 if let Some(instance) = self.instances.get_mut(&name) {
                     instance.failed_to_start();
                 }
@@ -331,6 +384,14 @@ impl Supervisor {
         self.shutdown.is_some()
     }
 
+    /// How long the loop may sleep before [`Supervisor::settled`] has to be
+    /// asked again: the shutdown's deadline. `settled` is otherwise asked
+    /// only when an event arrives, and a unit that never stops sends none —
+    /// the machine then waited for its backstop forever.
+    pub fn wait_bound(&self) -> Option<Duration> {
+        self.shutdown.as_ref().map(Shutdown::remaining)
+    }
+
     /// What to do now, if anything: `Some(action)` once every unit has
     /// stopped, or once waiting for the stragglers has gone on long enough.
     pub fn settled(&self) -> Option<Action> {
@@ -348,7 +409,7 @@ impl Supervisor {
         }
 
         if shutdown.overdue() {
-            eprintln!(
+            report!(
                 "oxinit: giving up waiting for {}; going down anyway",
                 busy.join(", ")
             );
@@ -427,7 +488,7 @@ impl Supervisor {
             if let Some(instance) = self.instances.get_mut(name) {
                 instance.failed_to_start();
             }
-            eprintln!("oxinit: {name}: {e}");
+            report!("oxinit: {name}: {e}");
             return;
         }
 
@@ -441,17 +502,18 @@ impl Supervisor {
                 if let Some(instance) = self.instances.get_mut(name) {
                     instance.failed_to_start();
                 }
-                eprintln!("oxinit: {name}: {e}");
+                report!("oxinit: {name}: {e}");
                 return;
             }
         };
 
         let cgroup = self.cgroups.get(name);
         let listen = self.sockets.for_service(name);
+        let source = &self.source;
         let spawned = self
             .instances
             .get(name)
-            .map(|instance| spawn(&instance.unit, cgroup, &listen, output));
+            .map(|instance| spawn(&instance.unit, source, cgroup, &listen, output));
 
         let Some(spawned) = spawned else {
             return;
@@ -504,7 +566,7 @@ impl Supervisor {
                         unit: name.to_owned(),
                     };
                     if let Err(e) = self.timers.schedule(start_sec, alarm) {
-                        eprintln!("oxinit: {e}");
+                        report!("oxinit: {e}");
                     }
                 }
 
@@ -514,7 +576,7 @@ impl Supervisor {
             }
             Err(e) => {
                 instance.failed_to_start();
-                eprintln!("oxinit: {name}: {e}");
+                report!("oxinit: {name}: {e}");
             }
         }
     }
@@ -556,7 +618,7 @@ impl Supervisor {
                     }
                 }
             }
-            Err(e) => eprintln!("oxinit: {name}: {e}"),
+            Err(e) => report!("oxinit: {name}: {e}"),
         }
     }
 
@@ -574,18 +636,20 @@ impl Supervisor {
             return;
         };
 
-        let service = timer.service.clone();
-        let schedule = timer.schedule.clone();
-
-        // Not re-armed once the machine is going down. The firing itself would
-        // be refused by `start`, so this is only about not announcing a
-        // schedule that will never be kept.
-        if !self.shutting_down() {
-            self.arm(name, &service, schedule.next(unix_now()));
+        // Nothing fires once the machine is going down: `start` would refuse
+        // the service anyway, and saying it was being started — or announcing
+        // the next firing — would be a log line describing something that
+        // does not happen.
+        if self.shutting_down() {
+            return;
         }
 
+        let service = timer.service.clone();
+        let schedule = timer.schedule.clone();
+        self.arm(name, &service, schedule.next(unix_now()));
+
         if !self.instances.contains_key(&service) {
-            eprintln!("oxinit: {name}: no unit named `{service}` to start");
+            report!("oxinit: {name}: no unit named `{service}` to start");
             return;
         }
 
@@ -599,7 +663,7 @@ impl Supervisor {
             .is_some_and(|instance| !is_idle(instance.state));
 
         if busy {
-            eprintln!("oxinit: {name}: {service} is still running; skipping this firing");
+            report!("oxinit: {name}: {service} is still running; skipping this firing");
             return;
         }
 
@@ -681,13 +745,20 @@ impl Supervisor {
                         delay, instance.restarts
                     );
                     if let Err(e) = self.timers.schedule(delay, Alarm::Restart { unit: name }) {
-                        eprintln!("oxinit: {e}");
+                        report!("oxinit: {e}");
                     }
                 }
                 None if deactivating => {
                     // Mid-stop the cgroup emptying is what ends the unit, not
-                    // this exit — unless there is no cgroup to wait on.
-                    if self.cgroups.get(&name).is_none() {
+                    // this exit — unless there is no cgroup to wait on, or it
+                    // emptied long ago: a daemon that left it took the
+                    // `populated` event with it, and this exit is the last
+                    // word there will be.
+                    let waiting = self
+                        .cgroups
+                        .get(&name)
+                        .is_some_and(|cgroup| cgroup.populated().unwrap_or(false));
+                    if !waiting {
                         self.finish_deactivation(&name);
                     }
                 }
@@ -715,7 +786,7 @@ impl Supervisor {
                 if let Some(instance) = self.instances.get_mut(name) {
                     instance.failed_to_start();
                 }
-                eprintln!(
+                report!(
                     "oxinit: {name}: type = \"forking\" needs a cgroup to tell whether \
                      anything is left running"
                 );
@@ -735,11 +806,11 @@ impl Supervisor {
             }
             (Exit::Clean, false) => {
                 instance.failed_to_start();
-                eprintln!("oxinit: {name}: the initial process left nothing running");
+                report!("oxinit: {name}: the initial process left nothing running");
             }
             (exit, _) => {
                 instance.failed_to_start();
-                eprintln!("oxinit: {name}: the initial process {exit}");
+                report!("oxinit: {name}: the initial process {exit}");
             }
         }
     }
@@ -802,7 +873,7 @@ impl Supervisor {
                     unit: name.to_owned(),
                 };
                 if let Err(e) = self.timers.schedule(delay, alarm) {
-                    eprintln!("oxinit: {e}");
+                    report!("oxinit: {e}");
                 }
             }
             None => println!("oxinit: {name} is {}", instance.state),
@@ -840,7 +911,7 @@ impl Supervisor {
                     unit: name.to_owned(),
                 };
                 if let Err(e) = self.timers.schedule(delay, alarm) {
-                    eprintln!("oxinit: {e}");
+                    report!("oxinit: {e}");
                 }
             }
             None => println!("oxinit: {name} is {}", instance.state),
@@ -907,7 +978,20 @@ impl Supervisor {
         instance.entered_deactivating(cause);
 
         let signalled = match self.cgroups.get(name) {
-            Some(cgroup) => terminate_cgroup(cgroup),
+            Some(cgroup) => {
+                let mut signalled = terminate_cgroup(cgroup);
+                // A daemon can move itself out of the cgroup it was started
+                // in — elogind does, into the hierarchy it manages. The
+                // cgroup is then empty and the process oxinit forked is
+                // elsewhere, still running; signalling the cgroup alone
+                // reached nothing and the stop waited for an exit that was
+                // never asked for, holding the shutdown open.
+                if let Some(pid) = child.filter(|pid| left_its_cgroup(cgroup, *pid)) {
+                    report!("oxinit: {name}: pid {pid} is no longer in its cgroup");
+                    signalled += usize::from(terminate(pid));
+                }
+                signalled
+            }
             // No cgroup to walk. The one pid oxinit knows about is all there
             // is to work with.
             None => child.map_or(0, |pid| usize::from(terminate(pid))),
@@ -919,7 +1003,7 @@ impl Supervisor {
             unit: name.to_owned(),
         };
         if let Err(e) = self.timers.schedule(stop_sec, alarm) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
         }
     }
 
@@ -941,7 +1025,7 @@ impl Supervisor {
             return;
         }
 
-        eprintln!("oxinit: {name} did not start in time; stopping it");
+        report!("oxinit: {name} did not start in time; stopping it");
         self.stop(name, StopCause::Watchdog);
     }
 
@@ -955,21 +1039,33 @@ impl Supervisor {
             return;
         }
 
-        eprintln!("oxinit: {name} did not stop in time; killing its cgroup");
+        report!("oxinit: {name} did not stop in time; killing its cgroup");
         instance.stop_timed_out();
         let child = instance.pid();
 
         match self.cgroups.get(name) {
             Some(cgroup) => {
-                if let Err(e) = cgroup.kill() {
-                    eprintln!("oxinit: {name}: {e}");
+                let killed = cgroup.kill();
+                if let Err(e) = &killed {
+                    report!("oxinit: {name}: {e}");
+                }
+                // The process oxinit forked, if `cgroup.kill` cannot have
+                // reached it: it moved out of the cgroup, or the cgroup is
+                // gone. Still oxinit's child, not yet reaped, so the pid
+                // cannot have been reused.
+                if let Some(pid) =
+                    child.filter(|pid| killed.is_err() || left_its_cgroup(cgroup, *pid))
+                {
+                    if let Some(pid) = Pid::from_raw(pid as i32) {
+                        let _ = rustix::process::kill_process(pid, Signal::KILL);
+                    }
                 }
             }
             None => {
                 // Without a cgroup this can only reach the one process oxinit
                 // forked; anything it forked in turn survives. Saying so
                 // beats pretending the unit is gone.
-                eprintln!("oxinit: {name}: no cgroup; only its initial process can be killed");
+                report!("oxinit: {name}: no cgroup; only its initial process can be killed");
                 if let Some(pid) = child {
                     if let Some(pid) = Pid::from_raw(pid as i32) {
                         let _ = rustix::process::kill_process(pid, Signal::KILL);
@@ -1076,7 +1172,7 @@ impl Supervisor {
 
             match result {
                 Ok(()) => self.sockets.set_armed(id, want),
-                Err(e) => eprintln!("oxinit: {service}: {e}"),
+                Err(e) => report!("oxinit: {service}: {e}"),
             }
         }
     }
@@ -1150,7 +1246,7 @@ impl Supervisor {
     /// re-bound: its descriptors were bound and registered with epoll once, at
     /// boot, and changing that safely is not something a reload can do.
     fn reload(&mut self) -> Response {
-        let loaded = oxinit_unit::load_default(&self.hostname);
+        let loaded = self.source.load(&self.hostname);
 
         if !loaded.errors.is_empty() {
             let problems: Vec<String> = loaded.errors.iter().map(ToString::to_string).collect();
@@ -1169,7 +1265,7 @@ impl Supervisor {
                 Some(_) | None => {
                     if matches!(unit.kind, Kind::Service(_)) {
                         if let Err(e) = self.cgroups.add(name, &unit.full_name()) {
-                            eprintln!("oxinit: {name}: {e}");
+                            report!("oxinit: {name}: {e}");
                         }
                     }
                     self.instances
@@ -1305,7 +1401,7 @@ impl Supervisor {
                 unit: unit.to_owned(),
             },
         ) {
-            eprintln!("oxinit: {e}");
+            report!("oxinit: {e}");
         }
     }
 
@@ -1315,7 +1411,7 @@ impl Supervisor {
         let fired = match self.timers.wall_expired(unix_now()) {
             Ok(fired) => fired,
             Err(e) => {
-                eprintln!("oxinit: {e}");
+                report!("oxinit: {e}");
                 return;
             }
         };
@@ -1331,7 +1427,7 @@ impl Supervisor {
         let fired = match self.timers.expired() {
             Ok(fired) => fired,
             Err(e) => {
-                eprintln!("oxinit: {e}");
+                report!("oxinit: {e}");
                 return;
             }
         };
@@ -1377,7 +1473,7 @@ impl Supervisor {
             return;
         }
 
-        eprintln!("oxinit: {name} missed its watchdog deadline");
+        report!("oxinit: {name} missed its watchdog deadline");
         self.report_usage(name);
 
         // Through the ordinary stop path rather than a SIGKILL to the one pid
@@ -1421,6 +1517,28 @@ fn terminate_cgroup(cgroup: &Cgroup) -> usize {
         .count()
 }
 
+/// Whether `pid` is outside `cgroup` and everything below it, from the
+/// process's own `/proc/PID/cgroup` — `cgroup.procs` lists only the cgroup
+/// itself, and a delegated unit's processes live in cgroups beneath it.
+/// `false` when that cannot be read: the process is gone, and there is
+/// nothing to signal.
+fn left_its_cgroup(cgroup: &Cgroup, pid: u32) -> bool {
+    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) else {
+        return false;
+    };
+    let Some(path) = text.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return false;
+    };
+    // The hierarchy's mount point is not part of what /proc reports, so the
+    // comparison is of the tail: the unit's cgroup is an ancestor of the
+    // process's, or the process's own.
+    !std::path::Path::new(path)
+        .ancestors()
+        .filter_map(|ancestor| ancestor.strip_prefix("/").ok())
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .any(|ancestor| cgroup.path().ends_with(ancestor))
+}
+
 fn terminate(pid: u32) -> bool {
     i32::try_from(pid)
         .ok()
@@ -1458,6 +1576,7 @@ fn is_idle(state: State) -> bool {
 /// one came from, in the order it receives them.
 fn spawn(
     unit: &Unit,
+    source: &UnitSource,
     cgroup: Option<&Cgroup>,
     listen: &[(&str, BorrowedFd<'_>)],
     output: Option<OwnedFd>,
@@ -1468,7 +1587,10 @@ fn spawn(
     // and exec there is no reading /etc/passwd and no allocating. Everything
     // that can fail fails now, where it can be reported against the unit that
     // asked for it.
-    let identity = if service.user == oxinit_user::ROOT {
+    //
+    // A user manager drops nothing: it already is the user, and has no
+    // privilege to change to anyone else. Its units cannot name a `user`.
+    let identity = if service.user == oxinit_user::ROOT || source.is_user() {
         None
     } else {
         Some(oxinit_user::resolve_system(&service.user).map_err(|e| e.to_string())?)
@@ -1489,7 +1611,10 @@ fn spawn(
     // The protocol is opt-in by type: a service that did not ask for it should
     // not find NOTIFY_SOCKET in its environment.
     if service.ty == ServiceType::Notify {
-        env.push(("NOTIFY_SOCKET".to_owned(), notify::NOTIFY_PATH.to_owned()));
+        env.push((
+            "NOTIFY_SOCKET".to_owned(),
+            source.notify.to_string_lossy().into_owned(),
+        ));
 
         // Services are expected to ping at roughly half this, so the interval
         // is passed through unchanged and the halving is their business.

@@ -1,0 +1,9 @@
+# sd_notify to a user manager: NOTIFY_SOCKET under the user's runtime
+# directory, and the sender's credentials checked by a manager that is not
+# PID 1. Stays up until the shutdown stops it.
+[unit]
+description = "sd_notify probe, for a user"
+
+[service]
+type = "notify"
+exec = "/bin/notify-probe"

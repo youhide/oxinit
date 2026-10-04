@@ -296,11 +296,33 @@ struct RawResources {
     tasks_max: Option<u64>,
 }
 
-/// Parse one unit file.
+/// Which manager a unit is loaded by.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// PID 1.
+    #[default]
+    System,
+    /// `oxinit --user`, running as the user named here.
+    ///
+    /// Every service runs as that user, because a user manager has nobody
+    /// else it could run one as. So `user` is refused rather than ignored —
+    /// a unit that says `user = "root"` and gets the user instead is a unit
+    /// that does not do what it says — and `%u` is the manager's user.
+    /// `tty` is refused too: the terminal belongs to the session, and a
+    /// service claiming it would take it from the user's own shell.
+    User { name: String },
+}
+
+/// Parse one unit file, for the system manager.
 ///
 /// `name` is the filename without `.toml`. `hostname` feeds the `%H`
 /// specifier; this crate does not read it from the system itself.
 pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> {
+    parse_in(name, text, hostname, &Scope::System)
+}
+
+/// Parse one unit file, for the manager `scope` says.
+pub fn parse_in(name: &str, text: &str, hostname: &str, scope: &Scope) -> Result<Unit, UnitError> {
     validate_name(name)?;
 
     let raw: RawFile = basic_toml::from_str(text).map_err(|source| UnitError::Toml {
@@ -352,7 +374,22 @@ pub fn parse(name: &str, text: &str, hostname: &str) -> Result<Unit, UnitError> 
 
     let kind = match (raw.service, raw.socket, raw.timer) {
         (Some(service), None, None) => {
-            let user = service.user.unwrap_or_else(|| "root".to_owned());
+            let user = match scope {
+                Scope::System => service.user.unwrap_or_else(|| "root".to_owned()),
+                Scope::User { name: owner } => {
+                    if service.user.is_some() {
+                        return Err(UnitError::UserInUserUnit {
+                            unit: name.to_owned(),
+                        });
+                    }
+                    if service.tty == Some(true) {
+                        return Err(UnitError::TtyInUserUnit {
+                            unit: name.to_owned(),
+                        });
+                    }
+                    owner.clone()
+                }
+            };
             let ty = service.ty.unwrap_or_default();
 
             let specifiers = Specifiers {
@@ -862,5 +899,63 @@ backlog = 64
             unit.service().unwrap().exec,
             ["/bin/x", "web", "web.service", "myhost"]
         );
+    }
+
+    fn ana() -> Scope {
+        Scope::User {
+            name: "ana".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_user_unit_runs_as_the_managers_user() {
+        let unit = parse_in(
+            "pipewire",
+            "[service]\nexec = \"/usr/bin/pipewire --who %u\"\n",
+            "h",
+            &ana(),
+        )
+        .unwrap();
+        let service = unit.service().unwrap();
+        assert_eq!(service.user, "ana");
+        assert_eq!(service.exec, ["/usr/bin/pipewire", "--who", "ana"]);
+    }
+
+    #[test]
+    fn a_user_unit_cannot_name_a_user_even_its_own() {
+        for user in ["root", "ana"] {
+            let text = format!("[service]\nexec = \"/bin/true\"\nuser = \"{user}\"\n");
+            assert_eq!(
+                parse_in("x", &text, "h", &ana()),
+                Err(UnitError::UserInUserUnit {
+                    unit: "x".to_owned()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_unit_cannot_claim_the_terminal() {
+        let text = "[service]\nexec = \"/bin/sh\"\ntty = true\n";
+        assert_eq!(
+            parse_in("x", text, "h", &ana()),
+            Err(UnitError::TtyInUserUnit {
+                unit: "x".to_owned()
+            })
+        );
+        // Saying no is saying nothing.
+        let text = "[service]\nexec = \"/bin/sh\"\ntty = false\n";
+        assert!(parse_in("x", text, "h", &ana()).is_ok());
+    }
+
+    #[test]
+    fn the_same_file_parses_the_same_in_both_scopes_but_for_who_runs_it() {
+        let text = "[unit]\nafter = [\"dbus\"]\n[service]\ntype = \"notify\"\nexec = \"/usr/bin/wireplumber\"\n";
+        let system = parse("wp", text, "h").unwrap();
+        let user = parse_in("wp", text, "h", &ana()).unwrap();
+        assert_eq!(system.deps, user.deps);
+        assert_eq!(system.service().unwrap().ty, user.service().unwrap().ty);
+        assert_eq!(system.service().unwrap().user, "root");
+        assert_eq!(user.service().unwrap().user, "ana");
     }
 }

@@ -24,9 +24,12 @@ pub mod unit;
 pub mod value;
 
 pub use error::{ExecError, UnitError, ValueError};
-pub use load::{load_default, load_dirs, Loaded, ETC_DIR, VENDOR_DIR};
+pub use load::{
+    load_default, load_dirs, load_dirs_in, user_dirs, Loaded, ETC_DIR, USER_CONFIG_SUBDIR,
+    USER_ETC_DIR, USER_VENDOR_DIR, VENDOR_DIR,
+};
 pub use unit::{
-    parse, Deps, Kind, Listen, Output, Resources, Restart, Service, ServiceType, Socket,
-    SocketType, Timer, Unit,
+    parse, parse_in, Deps, Kind, Listen, Output, Resources, Restart, Scope, Service, ServiceType,
+    Socket, SocketType, Timer, Unit,
 };
 pub use value::{parse_duration, parse_size, DurationValue, SizeValue};

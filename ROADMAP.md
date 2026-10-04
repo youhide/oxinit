@@ -1025,6 +1025,108 @@ Third time in this project that the failure was *editing text without looking
 at the output*, and the second time it reached somebody. It is worth naming as
 a pattern rather than as three separate slips.
 
+## M17 — A hardware watchdog
+
+**Done.**
+
+Asked for by hideOS, whose failure table has a row reading "PID 1 hangs —
+hardware watchdog reboots", and nothing behind it once the boot was over.
+Nothing on a machine recovers a hung PID 1, because nothing is above it; a
+timer in the chipset is.
+
+- [x] `/usr/lib/oxinit/watchdog.toml`, replaced by `/etc/oxinit/watchdog.toml`,
+      overridden key by key by `oxinit.watchdog.*` on the kernel command line.
+- [x] Fed from the loop body, not from a handler or a deadline alarm, so what
+      keeps the machine up is the loop coming round.
+- [x] Half the timeout the driver settled on; a device that is not there yet
+      looked for again.
+- [x] A boot deadline: `boot-unit` has to come up within `boot-sec`, or the
+      watchdog stops being fed and the hardware resets the machine.
+- [x] Disarmed with the magic close before a power off or a halt, left
+      running into a reboot. Never opened in a container.
+
+**Fed from the loop, and that is the design.** The tempting version is an
+alarm on the deadline heap, next to restart backoff and start timeouts. It
+would keep the machine alive through exactly the failures the watchdog is
+for: a heap that still fires while a handler elsewhere is wedged, or a panic
+that drops the alarm and resets a machine that had survived it. The write is
+in the loop body instead, after every handler, and `epoll_wait` gets a
+timeout for it — the only thing in oxinit that wakes without a descriptor.
+
+**The boot deadline is what makes it worth having on a machine that updates
+itself.** A boot manager that counts attempts — hideOS's does — can only
+count a hang if something resets it. Before this, hideOS armed the watchdog
+in its initramfs and stopped it from a unit at the end of boot; a hang
+anywhere before that unit was a reset, and a hang after it was a machine
+that sat there. Now one mechanism covers both: fed until the boot unit comes
+up or the deadline passes, and fed for ever after that.
+
+**The driver is a module, which the test had to face.** The netboot kernel
+`fetch` downloads has every watchdog driver as a module, and nothing in a
+hand-built initramfs can load one it does not carry. `test-watchdog` takes
+the kernel and its i6300esb module from the same `linux-virt` package, so
+they always match, and loads the module from a unit — which is how the
+device turning up after oxinit has started got a test rather than an
+assumption.
+
+Verified: `cargo xtask test-watchdog`. Fed for fourteen seconds on a four
+second timeout, then halted, and still running twelve seconds after the halt
+— under `-no-reboot`, where a reset would have ended QEMU. Then a boot unit
+that fails, a deadline cut from five minutes to eight seconds on the command
+line, and QEMU ending without a line of shutdown. 23 host tests in
+`oxinit-watchdog`, four more for `reached` in `oxinit-service`.
+
+## M18 — User managers
+
+**Done,** for what a service manager should do. What a session manager would
+do is listed below, open.
+
+Also asked for by hideOS, whose desktop starts PipeWire and WirePlumber from
+XDG autostart because oxinit had nowhere else to put a service that belongs
+to a user.
+
+- [x] `oxinit --user`: the same supervisor, run by a user, with its sockets
+      under `$XDG_RUNTIME_DIR/oxinit` and its units in
+      `/usr/lib/oxinit/user-units`, `/etc/oxinit/user-units` and
+      `~/.config/oxinit/user-units`.
+- [x] `user` and `tty` refused in a user unit; `%u` is the user.
+- [x] One per user: a second one finds the first answering and exits 0.
+- [x] A child subreaper, its own cgroup subtree when one is delegated, and
+      none — PID 1's degraded mode — when not.
+- [x] Every stop signal, and `SIGHUP`, stops its units and exits.
+- [x] `oxctl --user` and `oxlogd --user`.
+- [x] `oxinit-paths`: one definition of where every socket and log is, for
+      both scopes, which `oxinit-ipc` and `oxinit-log` now take theirs from.
+
+**The same binary, not a second program.** A user unit has to mean what the
+same file means to PID 1, and the way to guarantee that is to run it through
+the same code. What differs is a table in ARCHITECTURE, and every row in it
+is something the user manager *skips* — mounts, console, hostname, identity
+changes, `reboot(2)`, the watchdog — plus the one thing it does differently
+when its loop breaks: it exits, because it is not PID 1. That is the second
+`exit()` in the crate, and CLAUDE.md and ARCHITECTURE now say so.
+
+**Starting it is not oxinit's job.** "Manage logins or sessions" is a
+non-goal, and this does not change it: whatever starts a session starts the
+user manager, with the session's environment, and signals it at the end. The
+test image does it with a system unit running as `nobody`, which is also the
+answer for services that should outlive a login.
+
+Open, each a decision rather than missing code — see ARCHITECTURE:
+
+- Several sessions of one user share one manager, and the first to end stops
+  it. Counting sessions is a login manager's knowledge.
+- No cgroup delegation from PID 1, which would need a unit key.
+- No way to give running services a variable the session set after the
+  manager started.
+
+Verified: `cargo xtask test-boot`, 46 checks — a user manager for `nobody`
+started from a system unit, finding its cgroup not delegated and saying so;
+a user unit printing `oxinit-user: nobody is nobody`, which is `%u` and
+`id -un` agreeing; a `notify` user unit going ready on the user's own socket;
+and, at shutdown, the user manager stopping it and exiting before the machine
+syncs. The same units pass `test-distro` (48 checks) and `container` (10).
+
 ## Not doing, and why
 
 These were on the list. They are coming off it with a reason rather than

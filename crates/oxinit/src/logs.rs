@@ -20,14 +20,13 @@
 use std::io::IoSlice;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::Path;
 
 use rustix::fs::Mode;
 use rustix::net::{
     AddressFamily, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketAddrUnix,
     SocketFlags, SocketType,
 };
-
-use oxinit_log::SOCKET_PATH;
 
 use crate::error::{Error, Result};
 
@@ -61,11 +60,13 @@ pub struct Logs {
 }
 
 impl Logs {
-    pub fn bind() -> Result<Self> {
-        if let Some(parent) = std::path::Path::new(SOCKET_PATH).parent() {
+    /// Bind the socket `oxlogd` connects to: `/run/oxinit/log.sock` for the
+    /// system, under the user's runtime directory for a user manager.
+    pub fn bind(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::remove_file(SOCKET_PATH);
+        let _ = std::fs::remove_file(path);
 
         let listener = rustix::net::socket_with(
             AddressFamily::UNIX,
@@ -75,13 +76,13 @@ impl Logs {
         )
         .map_err(Error::Logs)?;
 
-        let addr = SocketAddrUnix::new(SOCKET_PATH).map_err(Error::Logs)?;
+        let addr = SocketAddrUnix::new(path).map_err(Error::Logs)?;
         rustix::net::bind(&listener, &addr).map_err(Error::Logs)?;
 
         // Same story as the control socket: whoever can open this receives
         // every service's output, and the mode is the whole of what stops
         // them.
-        rustix::fs::chmod(SOCKET_PATH, Mode::from_raw_mode(0o600)).map_err(Error::Logs)?;
+        rustix::fs::chmod(path, Mode::from_raw_mode(0o600)).map_err(Error::Logs)?;
         rustix::net::listen(&listener, BACKLOG).map_err(Error::Logs)?;
 
         Ok(Self {
@@ -122,7 +123,7 @@ impl Logs {
         };
 
         if self.shipper.is_some() {
-            eprintln!("oxinit: logs: a shipper is already connected; refusing");
+            report!("oxinit: logs: a shipper is already connected; refusing");
             return false;
         }
 
@@ -146,7 +147,7 @@ impl Logs {
     /// a replacement is a restart away.
     pub fn disconnect(&mut self) {
         if self.shipper.take().is_some() {
-            eprintln!("oxinit: logs: shipper gone; output is buffering in the pipes");
+            report!("oxinit: logs: shipper gone; output is buffering in the pipes");
         }
     }
 
@@ -227,7 +228,7 @@ fn offer(shipper: Option<&OwnedFd>, unit: &str, fd: BorrowedFd<'_>) {
     let rights = [fd];
 
     if !ancillary.push(SendAncillaryMessage::ScmRights(&rights)) {
-        eprintln!("oxinit: logs: {unit}: no room for the descriptor");
+        report!("oxinit: logs: {unit}: no room for the descriptor");
         return;
     }
 
@@ -237,6 +238,6 @@ fn offer(shipper: Option<&OwnedFd>, unit: &str, fd: BorrowedFd<'_>) {
         &mut ancillary,
         SendFlags::DONTWAIT,
     ) {
-        eprintln!("oxinit: logs: {unit}: {e}");
+        report!("oxinit: logs: {unit}: {e}");
     }
 }
